@@ -144,7 +144,7 @@ with col_context:
     fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Model_2_Regressors'], name='Model 2 (Regressors)', line=dict(color='#EF553B', width=3, dash='dot')))
     
     fig.update_layout(title="Model Divergence: The 'Why' Gap", template="plotly_dark", height=400)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 # -----------------------------------------------------------------------------
 # THE EXPLAINABILITY LAYER
@@ -152,11 +152,12 @@ with col_context:
 st.divider()
 st.header("Why do they disagree? (The Explainability Layer)")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔍 Historical Analog (Nearest Neighbor)", 
     "⚖️ Sensitivity & Stress Test", 
     "🔄 Counterfactuals", 
-    "📉 The Accuracy Tax"
+    "📉 The Accuracy Tax",
+    "🗣️ Feature Decoder"
 ])
 
 # --- TAB 1: NEAREST NEIGHBORS ---
@@ -175,7 +176,7 @@ with tab1:
         fig_cur = px.line(current_window, x='Date', y='Actuals', title="Last 30 Days Trend")
         fig_cur.update_traces(line_color='#00CC96')
         fig_cur.update_layout(height=250, template="plotly_dark", showlegend=False)
-        st.plotly_chart(fig_cur, use_container_width=True)
+        st.plotly_chart(fig_cur, width='stretch')
         
     with col_nn2:
         st.markdown(f"#### Nearest Historical Analog ({match_date.strftime('%Y-%m-%d')})")
@@ -183,7 +184,7 @@ with tab1:
         fig_hist = px.line(match_window, x='Date', y='Actuals', title="Closest Historical Match")
         fig_hist.update_traces(line_color='#FFA15A')
         fig_hist.update_layout(height=250, template="plotly_dark", showlegend=False)
-        st.plotly_chart(fig_hist, use_container_width=True)
+        st.plotly_chart(fig_hist, width='stretch')
         
     st.success(f"**Interpretation:** Model 1 is recognizing that the combination of Volatility and Price Trends today is 94% similar to the period starting on **{match_date.strftime('%Y-%m-%d')}**. In that period, sales rose, which is why Model 1 is bullish.")
 
@@ -224,7 +225,7 @@ with tab2:
         fig_sens.add_vline(x=new_price, line_color="yellow", annotation_text="Simulated")
         
         fig_sens.update_layout(title="Price Sensitivity Curves", xaxis_title="Price ($)", yaxis_title="Predicted Sales", template="plotly_dark")
-        st.plotly_chart(fig_sens, use_container_width=True)
+        st.plotly_chart(fig_sens, width='stretch')
 
 # --- TAB 3: COUNTERFACTUALS ---
 with tab3:
@@ -287,5 +288,30 @@ with tab4:
         ]
     )
     
-    st.plotly_chart(fig_tax, use_container_width=True)
+    st.plotly_chart(fig_tax, width='stretch')
     st.warning("The 'Yellow Zone' is where N-BEATS and N-HiTS live. We accept that they are hard to explain (Low X-axis) because they provide the lowest error (Low Y-axis). If you want to move to the right (higher explainability), you must accept higher error.")
+
+# --- TAB 5: FEATURE DECODER ---
+with tab5:
+    st.markdown("""
+    **Stakeholder Question:** *"What do you mean 'Lag_7' is driving the forecast? Speak English."*
+    """)
+    
+    feature_data = {
+        "Technical Feature Name": ["Lag_7", "Lag_365", "Rolling_Mean_30", "Rolling_Std_7", "Exp_Moving_Avg"],
+        "Business Translation": ["Same Day Last Week", "Same Day Last Year", "30-Day Trend Base", "Recent Volatility", "Recent Momentum"],
+        "What it tells the model": [
+            "Matches the day-of-week pattern (e.g., high traffic on Fridays).",
+            "Matches the annual seasonality (e.g., Christmas spike).",
+            "Ignores daily noise to find the 'True' demand level.",
+            "Detects if the market is currently chaotic or stable.",
+            "Weights yesterday heavily; assumes recent history is most important."
+        ]
+    }
+    
+    df_features = pd.DataFrame(feature_data)
+    
+    # Simple table styling
+    st.table(df_features)
+    
+    st.info("💡 **Pro Tip:** Never show the 'Technical Feature Name' to a stakeholder. Always alias your feature importance charts with the 'Business Translation'.")
