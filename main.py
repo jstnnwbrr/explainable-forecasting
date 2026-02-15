@@ -4,314 +4,811 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_percentage_error, mean_absolute_error
+from scipy import stats
+import warnings
 
-# -----------------------------------------------------------------------------
-# CONFIGURATION & STYLE
-# -----------------------------------------------------------------------------
-st.set_page_config(page_title="Forecasting Explanation Bridge", layout="wide")
+warnings.filterwarnings('ignore')
+
+# =============================================================================
+# PHASE 4: THE CONFIDENCE TRANSLATOR
+# 
+# Philosophy: Stop explaining "why the model thinks X" and start explaining
+# "what would have to change for this forecast to be wrong" and 
+# "here's what happened last time the data looked like this"
+# =============================================================================
+
+st.set_page_config(page_title="Phase 4: Confidence Translator", layout="wide", page_icon="🎯")
 
 st.markdown("""
 <style>
-    .metric-card {
-        background-color: #1E1E1E;
+    .main { background-color: #0E1117; }
+    h1, h2, h3 { color: #FAFAFA; font-family: 'Helvetica Neue', sans-serif; }
+    
+    .confidence-high {
+        background: linear-gradient(135deg, #1e3a20 0%, #2d5a2f 100%);
         padding: 20px;
         border-radius: 10px;
         border-left: 5px solid #4CAF50;
+        margin: 10px 0;
     }
-    .highlight {
-        color: #FF4B4B;
+    
+    .confidence-medium {
+        background: linear-gradient(135deg, #3a3520 0%, #5a4f2f 100%);
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 5px solid #FFA726;
+        margin: 10px 0;
+    }
+    
+    .confidence-low {
+        background: linear-gradient(135deg, #3a2020 0%, #5a2f2f 100%);
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 5px solid #EF5350;
+        margin: 10px 0;
+    }
+    
+    .precedent-card {
+        background-color: #1a1f2e;
+        padding: 15px;
+        border-radius: 8px;
+        border: 2px solid #3b82f6;
+        margin: 10px 0;
+    }
+    
+    .risk-alert {
+        background-color: #2d1b1b;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #dc2626;
+        margin: 10px 0;
+    }
+    
+    .metric-big {
+        font-size: 2.5em;
         font-weight: bold;
+        color: #00CC96;
     }
-    .persona-box {
-        background-color: #262730;
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 10px;
-        font-size: 0.9em;
+    
+    .stMetric {
+        background-color: #1a1f2e;
+        padding: 15px;
+        border-radius: 8px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
-# DATA SIMULATION (MOCKING THE MODELS)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# DATA GENERATION & LOADING
+# =============================================================================
+
 @st.cache_data
-def generate_data():
-    """Generates synthetic time series and simulates model outputs."""
+def generate_synthetic_data():
+    """Enhanced synthetic data with realistic patterns"""
     np.random.seed(42)
-    dates = pd.date_range(start="2023-01-01", periods=365, freq="D")
+    n_days = 730
+    dates = pd.date_range(start="2023-01-01", periods=n_days, freq="D")
     
     # Features
-    price = np.random.uniform(90, 110, size=365)
-    marketing = np.random.uniform(500, 1500, size=365)
+    price = 100 + np.random.normal(0, 5, n_days).cumsum() * 0.1
+    price = np.clip(price, 85, 115)
     
-    # Base Signal (Seasonality + Trend)
-    t = np.arange(365)
-    seasonality = 10 * np.sin(2 * np.pi * t / 30) # Monthly seasonality
-    trend = 0.1 * t
-    noise = np.random.normal(0, 2, 365)
+    marketing = 1000 + np.random.normal(0, 200, n_days).cumsum() * 0.5
+    marketing = np.clip(marketing, 500, 3000)
     
-    actuals = 100 + trend + seasonality - (0.5 * (price - 100)) + (0.01 * marketing) + noise
+    competitor_promo = np.random.choice([0, 1], size=n_days, p=[0.92, 0.08])
     
-    # --- MODEL 1 SIMULATION (Time Series Specialists: N-BEATS, N-HiTS, etc.) ---
-    # Captures seasonality well, smoother, slightly lagging but robust
-    m1_pred = 100 + trend + seasonality - (0.3 * (price - 100)) + (0.005 * marketing) + np.random.normal(0, 1, 365)
+    # Complex realistic patterns
+    t = np.arange(n_days)
+    trend = 0.08 * t
+    weekly = 25 * np.sin(2 * np.pi * t / 7)
+    monthly = 15 * np.sin(2 * np.pi * t / 30)
+    annual = 40 * np.sin(2 * np.pi * t / 365)
     
-    # --- MODEL 2 SIMULATION (Regressors: ElasticNet, TheilSen, etc.) ---
-    # Over-indexes on features (Price/Marketing), misses seasonality, noisier
-    m2_pred = 100 + trend + (0.1 * seasonality) - (0.9 * (price - 100)) + (0.02 * marketing) + np.random.normal(0, 5, 365)
-
-    df = pd.DataFrame({
+    # Non-linear interactions
+    base = 500
+    sales = (base + trend + weekly + monthly + annual 
+             - 2.8 * (price - 100) 
+             + 0.15 * np.sqrt(marketing)
+             - 45 * competitor_promo
+             + 0.01 * (price - 100) * marketing / 1000  # Interaction
+             + np.random.normal(0, 5, n_days))
+    
+    return pd.DataFrame({
         'Date': dates,
-        'Actuals': actuals,
+        'Sales': sales,
         'Price': price,
         'Marketing': marketing,
-        'Model_1_TS_Specialists': m1_pred,
-        'Model_2_Regressors': m2_pred
+        'Competitor_Promo': competitor_promo
     })
-    return df
 
-data = generate_data()
+def load_user_data(file):
+    """Load and validate user data"""
+    if file is None:
+        return generate_synthetic_data()
+    
+    try:
+        df = pd.read_csv(file)
+        for col in df.columns:
+            if 'date' in col.lower():
+                df[col] = pd.to_datetime(df[col])
+        return df
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return generate_synthetic_data()
 
-# -----------------------------------------------------------------------------
-# HELPER FUNCTIONS FOR EXPLAINABILITY
-# -----------------------------------------------------------------------------
-def find_nearest_neighbor(current_window, history_df, window_size=30):
-    """Finds the historical period most similar to the current data pattern."""
-    scaler = MinMaxScaler()
+# =============================================================================
+# FEATURE ENGINEERING
+# =============================================================================
+
+def engineer_features(df, date_col, target_col, driver_cols):
+    """Create time series features"""
+    df = df.sort_values(date_col).reset_index(drop=True).copy()
     
-    # We look at the pattern of the last 'window_size' days
-    # Features to compare: Actuals shape, Price, Marketing
+    # Time features
+    df['DayOfWeek'] = df[date_col].dt.dayofweek
+    df['Month'] = df[date_col].dt.month
+    df['Quarter'] = df[date_col].dt.quarter
+    df['IsWeekend'] = (df['DayOfWeek'] >= 5).astype(int)
+    df['DayOfMonth'] = df[date_col].dt.day
     
-    # Prepare historical sliding windows
-    history_windows = []
-    indices = []
+    # Cyclical encoding
+    df['DayOfWeek_Sin'] = np.sin(2 * np.pi * df['DayOfWeek'] / 7)
+    df['DayOfWeek_Cos'] = np.cos(2 * np.pi * df['DayOfWeek'] / 7)
+    df['Month_Sin'] = np.sin(2 * np.pi * df['Month'] / 12)
+    df['Month_Cos'] = np.cos(2 * np.pi * df['Month'] / 12)
     
-    target_data = history_df[['Actuals', 'Price', 'Marketing']].values
+    # Lags and rolling features
+    for lag in [1, 7, 14, 28]:
+        df[f'Lag_{lag}'] = df[target_col].shift(lag)
     
-    for i in range(len(target_data) - window_size * 2): # Avoid overlapping with current
-        window = target_data[i:i+window_size].flatten()
-        history_windows.append(window)
-        indices.append(i)
+    for window in [7, 14, 28]:
+        df[f'RollingMean_{window}'] = df[target_col].rolling(window).mean().shift(1)
+        df[f'RollingStd_{window}'] = df[target_col].rolling(window).std().shift(1)
+    
+    # Momentum
+    df['Momentum_7'] = df[target_col].diff(7)
+    
+    df = df.dropna().reset_index(drop=True)
+    
+    engineered = ['DayOfWeek', 'Month', 'Quarter', 'IsWeekend', 'DayOfMonth',
+                  'DayOfWeek_Sin', 'DayOfWeek_Cos', 'Month_Sin', 'Month_Cos',
+                  'Lag_1', 'Lag_7', 'Lag_14', 'Lag_28',
+                  'RollingMean_7', 'RollingMean_14', 'RollingMean_28',
+                  'RollingStd_7', 'RollingStd_14', 'RollingStd_28',
+                  'Momentum_7']
+    
+    return df, driver_cols + engineered
+
+# =============================================================================
+# ENSEMBLE MODELING WITH CONFIDENCE INTERVALS
+# =============================================================================
+
+class ConfidenceEnsemble:
+    """
+    Ensemble that provides not just predictions but confidence intervals
+    based on model agreement and historical errors
+    """
+    
+    def __init__(self):
+        self.models = {
+            'GradientBoost': GradientBoostingRegressor(n_estimators=200, max_depth=5, learning_rate=0.05, random_state=42),
+            'RandomForest': RandomForestRegressor(n_estimators=200, max_depth=15, random_state=42),
+            'Ridge': Ridge(alpha=1.0)
+        }
+        self.scaler = StandardScaler()
+        self.feature_names = None
+        self.historical_errors = None
         
-    history_windows = np.array(history_windows)
+    def fit(self, X, y, feature_names):
+        self.feature_names = feature_names
+        X_scaled = self.scaler.fit_transform(X)
+        
+        # Train all models
+        predictions = []
+        for name, model in self.models.items():
+            if name == 'Ridge':
+                model.fit(X_scaled, y)
+                pred = model.predict(X_scaled)
+            else:
+                model.fit(X, y)
+                pred = model.predict(X)
+            predictions.append(pred)
+        
+        # Calculate historical errors for each model
+        predictions = np.array(predictions)
+        ensemble_pred = predictions.mean(axis=0)
+        self.historical_errors = y - ensemble_pred
+        
+        return self
     
-    # Current window (the input pattern)
-    current_pattern = current_window[['Actuals', 'Price', 'Marketing']].values.flatten().reshape(1, -1)
+    def predict_with_confidence(self, X):
+        """Returns mean prediction, std, and confidence intervals"""
+        predictions = []
+        
+        for name, model in self.models.items():
+            if name == 'Ridge':
+                X_scaled = self.scaler.transform(X)
+                pred = model.predict(X_scaled)
+            else:
+                pred = model.predict(X)
+            predictions.append(pred)
+        
+        predictions = np.array(predictions)
+        
+        # Ensemble mean
+        mean_pred = predictions.mean(axis=0)
+        
+        # Model disagreement (variance across models)
+        model_std = predictions.std(axis=0)
+        
+        # Historical error distribution
+        error_std = np.std(self.historical_errors)
+        
+        # Combined confidence interval
+        # 68% confidence (1 sigma)
+        ci_68_lower = mean_pred - (model_std + error_std)
+        ci_68_upper = mean_pred + (model_std + error_std)
+        
+        # 95% confidence (2 sigma)
+        ci_95_lower = mean_pred - 2 * (model_std + error_std)
+        ci_95_upper = mean_pred + 2 * (model_std + error_std)
+        
+        return {
+            'mean': mean_pred,
+            'model_std': model_std,
+            'error_std': error_std,
+            'ci_68': (ci_68_lower, ci_68_upper),
+            'ci_95': (ci_95_lower, ci_95_upper),
+            'model_predictions': predictions
+        }
     
-    # Fit Nearest Neighbors
-    nn = NearestNeighbors(n_neighbors=1, metric='euclidean')
-    nn.fit(history_windows)
-    
-    distances, neighbor_idx = nn.kneighbors(current_pattern)
-    
-    start_idx = indices[neighbor_idx[0][0]]
-    match_date = history_df.iloc[start_idx]['Date']
-    return match_date, start_idx
+    def get_feature_importance(self):
+        """Get feature importance from tree-based models"""
+        # Average importance across tree models
+        gb_importance = self.models['GradientBoost'].feature_importances_
+        rf_importance = self.models['RandomForest'].feature_importances_
+        
+        avg_importance = (gb_importance + rf_importance) / 2
+        
+        return pd.DataFrame({
+            'Feature': self.feature_names,
+            'Importance': avg_importance
+        }).sort_values('Importance', ascending=False)
 
-# -----------------------------------------------------------------------------
-# UI LAYOUT
-# -----------------------------------------------------------------------------
+# =============================================================================
+# HISTORICAL PRECEDENT FINDER
+# =============================================================================
 
-st.title("Forecast Interpretability Bridge")
-st.markdown("### Translating High-Accuracy Black Boxes into Business Logic")
-
-col_setup, col_context = st.columns([1, 3])
-
-with col_setup:
-    st.info("👋 **The Stakeholder Reality Check**\n\nYou asked for explainability. We are using **Model 1** (Ensemble of Deep Learning/TS) and **Model 2** (Ensemble of Regressors).")
+def find_similar_periods(current_pattern, historical_data, date_col, target_col, n_matches=3):
+    """
+    Find historical periods that looked similar to current conditions
+    Returns what happened AFTER those similar periods
+    """
+    from sklearn.metrics.pairwise import cosine_similarity
     
-    current_date_idx = st.slider("Select Forecast Simulation Day", 300, 360, 350)
-    current_row = data.iloc[current_date_idx]
+    window_size = len(current_pattern)
+    historical_windows = []
+    start_indices = []
+    
+    # Create sliding windows
+    for i in range(len(historical_data) - window_size - 30):  # -30 to see what happened after
+        window = historical_data.iloc[i:i+window_size][target_col].values
+        historical_windows.append(window)
+        start_indices.append(i)
+    
+    if not historical_windows:
+        return []
+    
+    historical_windows = np.array(historical_windows)
+    current = current_pattern[target_col].values.reshape(1, -1)
+    
+    # Calculate similarity
+    similarities = cosine_similarity(current, historical_windows)[0]
+    
+    # Get top N matches
+    top_indices = similarities.argsort()[-n_matches:][::-1]
+    
+    matches = []
+    for idx in top_indices:
+        start_idx = start_indices[idx]
+        match_start = historical_data.iloc[start_idx][date_col]
+        match_window = historical_data.iloc[start_idx:start_idx+window_size]
+        after_window = historical_data.iloc[start_idx+window_size:start_idx+window_size+30]
+        
+        if len(after_window) > 0:
+            matches.append({
+                'start_date': match_start,
+                'similarity': similarities[idx],
+                'before': match_window,
+                'after': after_window,
+                'avg_before': match_window[target_col].mean(),
+                'avg_after': after_window[target_col].mean(),
+                'change_pct': ((after_window[target_col].mean() - match_window[target_col].mean()) 
+                              / match_window[target_col].mean() * 100)
+            })
+    
+    return matches
+
+# =============================================================================
+# RISK SCENARIO GENERATOR
+# =============================================================================
+
+def generate_risk_scenarios(base_forecast, drivers_current, driver_cols):
+    """
+    Generate scenarios that answer: "What would have to change for this to be wrong?"
+    """
+    scenarios = []
+    
+    for driver in driver_cols:
+        # Downside scenario
+        scenarios.append({
+            'name': f'{driver} Drops 20%',
+            'type': 'downside',
+            'driver': driver,
+            'change': -20,
+            'likelihood': 'Medium' if 'price' in driver.lower() else 'Low'
+        })
+        
+        # Upside scenario
+        scenarios.append({
+            'name': f'{driver} Increases 20%',
+            'type': 'upside',
+            'driver': driver,
+            'change': 20,
+            'likelihood': 'Medium'
+        })
+    
+    # Extreme scenario
+    scenarios.append({
+        'name': 'Market Shock (All Drivers Deteriorate)',
+        'type': 'extreme_downside',
+        'driver': 'all',
+        'change': -30,
+        'likelihood': 'Very Low'
+    })
+    
+    return scenarios
+
+# =============================================================================
+# MAIN APP
+# =============================================================================
+
+# Sidebar
+with st.sidebar:
+    st.title("🎯 Setup")
+    
+    uploaded = st.file_uploader("Upload CSV (optional)", type=['csv'])
+    raw_df = load_user_data(uploaded)
+    
+    st.success(f"✓ {len(raw_df)} rows loaded")
+    
+    # Column selection
+    all_cols = list(raw_df.columns)
+    date_col = st.selectbox("Date Column", all_cols, 
+                            index=next((i for i, c in enumerate(all_cols) if 'date' in c.lower()), 0))
+    
+    try:
+        raw_df[date_col] = pd.to_datetime(raw_df[date_col])
+    except:
+        st.error("Invalid date column")
+        st.stop()
+    
+    numeric_cols = raw_df.select_dtypes(include=np.number).columns.tolist()
+    target_col = st.selectbox("Target (What to Forecast)", numeric_cols)
+    driver_cols = st.multiselect("Drivers (What Influences Target)", 
+                                 [c for c in numeric_cols if c != target_col],
+                                 default=[c for c in numeric_cols if c != target_col][:2])
+    
+    if not driver_cols:
+        st.warning("Select at least one driver")
+        st.stop()
     
     st.markdown("---")
-    st.markdown("**Current Drivers:**")
-    st.metric("Price", f"${current_row['Price']:.2f}")
-    st.metric("Marketing Spend", f"${current_row['Marketing']:.0f}")
+    st.markdown("### 🎲 Scenario Builder")
+    scenario_changes = {}
+    for driver in driver_cols:
+        scenario_changes[driver] = st.slider(
+            f"{driver}", -50, 50, 0, 
+            format="%d%%", key=f"scen_{driver}"
+        )
 
-# -----------------------------------------------------------------------------
-# MAIN FORECAST PLOT
-# -----------------------------------------------------------------------------
-with col_context:
-    # Prepare data for plotting
-    plot_df = data.iloc[current_date_idx-60 : current_date_idx+1]
+# Train model
+with st.spinner("🧠 Training ensemble..."):
+    processed_df, feature_cols = engineer_features(raw_df, date_col, target_col, driver_cols)
     
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Actuals'], name='Actual History', line=dict(color='gray', width=1)))
-    fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Model_1_TS_Specialists'], name='Model 1 (TS/Deep Learning)', line=dict(color='#00CC96', width=3)))
-    fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Model_2_Regressors'], name='Model 2 (Regressors)', line=dict(color='#EF553B', width=3, dash='dot')))
+    # Split
+    train_size = len(processed_df) - 60
+    train_df = processed_df.iloc[:train_size]
+    test_df = processed_df.iloc[train_size:]
     
-    fig.update_layout(title="Model Divergence: The 'Why' Gap", template="plotly_dark", height=400)
-    st.plotly_chart(fig, width='stretch')
+    X_train = train_df[feature_cols]
+    y_train = train_df[target_col]
+    X_test = test_df[feature_cols]
+    y_test = test_df[target_col]
+    
+    # Train ensemble
+    ensemble = ConfidenceEnsemble()
+    ensemble.fit(X_train, y_train, feature_cols)
+    
+    # Evaluate
+    test_preds = ensemble.predict_with_confidence(X_test)
+    mape = mean_absolute_percentage_error(y_test, test_preds['mean'])
+    mae = mean_absolute_error(y_test, test_preds['mean'])
 
-# -----------------------------------------------------------------------------
-# THE EXPLAINABILITY LAYER
-# -----------------------------------------------------------------------------
+# Header
+st.title(f"🎯 Forecast: {target_col}")
+st.markdown(f"**Philosophy:** We don't explain *why* the model thinks something. We explain *what would have to change* for it to be wrong.")
+
+# Top metrics
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Model Accuracy", f"{(1-mape)*100:.1f}%", 
+              help="How often the model was right in testing")
+with col2:
+    confidence_score = 100 - (test_preds['model_std'].mean() / test_preds['mean'].mean() * 100)
+    st.metric("Confidence Score", f"{confidence_score:.0f}/100",
+              help="Based on model agreement")
+with col3:
+    st.metric("Avg Error", f"±{mae:.0f}",
+              help="Typical prediction error in actual units")
+with col4:
+    recent_trend = (processed_df[target_col].iloc[-7:].mean() - 
+                   processed_df[target_col].iloc[-14:-7].mean()) / processed_df[target_col].iloc[-14:-7].mean() * 100
+    st.metric("Recent Trend", f"{recent_trend:+.1f}%")
+
 st.divider()
-st.header("Why do they disagree? (The Explainability Layer)")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🔍 Historical Analog (Nearest Neighbor)", 
-    "⚖️ Sensitivity & Stress Test", 
-    "🔄 Counterfactuals", 
-    "📉 The Accuracy Tax",
-    "🗣️ Feature Decoder"
+# Main tabs
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📈 Forecast with Confidence Bands",
+    "🔍 Historical Precedent",
+    "⚠️ Risk Scenarios",
+    "🎯 What Matters Most"
 ])
 
-# --- TAB 1: NEAREST NEIGHBORS ---
+# TAB 1: Forecast
 with tab1:
-    st.markdown("""
-    **Stakeholder Question:** *"Why is Model 1 predicting this curve?"* **Answer:** *"Because the current market conditions look exactly like this previous period."*
-    """)
+    st.markdown("### The forecast is a RANGE, not a single number")
     
-    current_window = data.iloc[current_date_idx-30 : current_date_idx]
-    match_date, start_idx = find_nearest_neighbor(current_window, data)
+    # Generate future forecast
+    last_date = processed_df[date_col].max()
+    future_dates = pd.date_range(last_date + timedelta(days=1), periods=30, freq='D')
     
-    col_nn1, col_nn2 = st.columns(2)
+    # Simplified future feature generation
+    recent = processed_df.tail(60)
+    future_df = pd.DataFrame({date_col: future_dates})
     
-    with col_nn1:
-        st.markdown(f"#### Current Market Pattern ({data.iloc[current_date_idx]['Date'].strftime('%Y-%m-%d')})")
-        fig_cur = px.line(current_window, x='Date', y='Actuals', title="Last 30 Days Trend")
-        fig_cur.update_traces(line_color='#00CC96')
-        fig_cur.update_layout(height=250, template="plotly_dark", showlegend=False)
-        st.plotly_chart(fig_cur, width='stretch')
-        
-    with col_nn2:
-        st.markdown(f"#### Nearest Historical Analog ({match_date.strftime('%Y-%m-%d')})")
-        match_window = data.iloc[start_idx : start_idx+30]
-        fig_hist = px.line(match_window, x='Date', y='Actuals', title="Closest Historical Match")
-        fig_hist.update_traces(line_color='#FFA15A')
-        fig_hist.update_layout(height=250, template="plotly_dark", showlegend=False)
-        st.plotly_chart(fig_hist, width='stretch')
-        
-    st.success(f"**Interpretation:** Model 1 is recognizing that the combination of Volatility and Price Trends today is 94% similar to the period starting on **{match_date.strftime('%Y-%m-%d')}**. In that period, sales rose, which is why Model 1 is bullish.")
-
-# --- TAB 2: SENSITIVITY ANALYSIS ---
-with tab2:
-    st.markdown("""
-    **Stakeholder Question:** *"What happens if we drop price?"* **Answer:** *"Model 2 will react violently. Model 1 will barely care."*
-    """)
+    # Apply scenarios to drivers
+    for driver in driver_cols:
+        base_val = recent[driver].mean()
+        pct = scenario_changes.get(driver, 0)
+        future_df[driver] = base_val * (1 + pct/100)
     
-    col_sense_controls, col_sense_plot = st.columns([1, 2])
+    # Calendar features
+    future_df['DayOfWeek'] = future_df[date_col].dt.dayofweek
+    future_df['Month'] = future_df[date_col].dt.month
+    future_df['Quarter'] = future_df[date_col].dt.quarter
+    future_df['IsWeekend'] = (future_df['DayOfWeek'] >= 5).astype(int)
+    future_df['DayOfMonth'] = future_df[date_col].dt.day
+    future_df['DayOfWeek_Sin'] = np.sin(2 * np.pi * future_df['DayOfWeek'] / 7)
+    future_df['DayOfWeek_Cos'] = np.cos(2 * np.pi * future_df['DayOfWeek'] / 7)
+    future_df['Month_Sin'] = np.sin(2 * np.pi * future_df['Month'] / 12)
+    future_df['Month_Cos'] = np.cos(2 * np.pi * future_df['Month'] / 12)
     
-    with col_sense_controls:
-        price_delta = st.slider("Simulate Price Change (%)", -20, 20, 0)
-        
-        # Calculate impact based on our simulation formulas
-        # Model 1 coefficient was 0.3, Model 2 was 0.9
-        base_price = current_row['Price']
-        new_price = base_price * (1 + price_delta/100)
-        
-        m1_impact = -0.3 * (new_price - base_price)
-        m2_impact = -0.9 * (new_price - base_price)
-        
-        st.markdown(f"**New Price:** ${new_price:.2f}")
-        st.markdown("---")
-        st.warning(f"**Model 1 Impact:** {m1_impact:.2f} units")
-        st.error(f"**Model 2 Impact:** {m2_impact:.2f} units")
-        
-    with col_sense_plot:
-        # Generate sensitivity curve
-        prices = np.linspace(base_price * 0.8, base_price * 1.2, 50)
-        m1_curve = [current_row['Model_1_TS_Specialists'] - (0.3 * (p - base_price)) for p in prices]
-        m2_curve = [current_row['Model_2_Regressors'] - (0.9 * (p - base_price)) for p in prices]
-        
-        fig_sens = go.Figure()
-        fig_sens.add_trace(go.Scatter(x=prices, y=m1_curve, name='Model 1 Sensitivity', line=dict(color='#00CC96')))
-        fig_sens.add_trace(go.Scatter(x=prices, y=m2_curve, name='Model 2 Sensitivity', line=dict(color='#EF553B')))
-        fig_sens.add_vline(x=base_price, line_dash="dash", annotation_text="Current Price")
-        fig_sens.add_vline(x=new_price, line_color="yellow", annotation_text="Simulated")
-        
-        fig_sens.update_layout(title="Price Sensitivity Curves", xaxis_title="Price ($)", yaxis_title="Predicted Sales", template="plotly_dark")
-        st.plotly_chart(fig_sens, width='stretch')
-
-# --- TAB 3: COUNTERFACTUALS ---
-with tab3:
-    st.markdown("""
-    **Stakeholder Question:** *"Why is Model 2 so much lower than Model 1?"* **Answer:** *"For Model 2 to agree with Model 1, we would have to spend way more on marketing."*
-    """)
+    # Lags (use recent history)
+    for lag in [1, 7, 14, 28]:
+        future_df[f'Lag_{lag}'] = recent[target_col].iloc[-lag:].mean()
     
-    diff = current_row['Model_1_TS_Specialists'] - current_row['Model_2_Regressors']
+    for window in [7, 14, 28]:
+        future_df[f'RollingMean_{window}'] = recent[target_col].tail(window).mean()
+        future_df[f'RollingStd_{window}'] = recent[target_col].tail(window).std()
     
-    # Calculate how much marketing is needed to close the gap for Model 2
-    # Model 2 marketing coeff is 0.02
-    marketing_needed = diff / 0.02
-    total_marketing_needed = current_row['Marketing'] + marketing_needed
+    future_df['Momentum_7'] = recent[target_col].diff().tail(7).mean()
     
-    col_cf1, col_cf2 = st.columns(2)
+    # Predict
+    X_future = future_df[feature_cols]
+    future_preds = ensemble.predict_with_confidence(X_future)
     
-    with col_cf1:
-        st.metric("Prediction Gap", f"{diff:.2f} units")
-        
-    with col_cf2:
-        st.markdown("#### The Counterfactual Condition")
-        st.info(f"""
-        Model 2 (The Regressor) relies heavily on **Marketing Spend**. 
-        
-        To force Model 2 to match Model 1's prediction, you would need to increase daily marketing spend by:
-        # **${marketing_needed:.2f}** (Total Spend: ${total_marketing_needed:.2f})
-        """)
-        
-    st.markdown("---")
-    st.markdown("**Why this matters:** This tells you that Model 1 is seeing organic demand (Trend/Seasonality) that Model 2 thinks *must* be paid for via Marketing.")
-
-# --- TAB 4: ACCURACY TAX ---
-with tab4:
-    st.markdown("""
-    **Stakeholder Challenge:** *"I want perfect explanation AND perfect accuracy."* **Answer:** *"Pick one."*
-    """)
+    # Visualization
+    fig = go.Figure()
     
-    # Mock accuracy data
-    acc_data = pd.DataFrame({
-        'Model': ['SES (Model 1)', 'Auto-ARIMA (Model 1)', 'Prophet (Model 1)', 'N-HiTS (Model 1)', 'N-BEATS (Model 1)', 
-                  'Poly Reg (Model 2)', 'ElasticNet (Model 2)', 'TheilSen (Model 2)', 'MLP (Model 2)'],
-        'Accuracy (MAPE)': [15, 12, 10, 5, 4, 14, 11, 13, 6], # Lower is better
-        'Explainability Score': [9, 8, 7, 2, 1, 8, 8, 6, 2], # Higher is better
-        'Group': ['Model 1', 'Model 1', 'Model 1', 'Model 1', 'Model 1', 'Model 2', 'Model 2', 'Model 2', 'Model 2']
-    })
+    # Historical
+    hist = processed_df.tail(90)
+    fig.add_trace(go.Scatter(
+        x=hist[date_col], y=hist[target_col],
+        name='Historical', line=dict(color='gray', width=2),
+        hovertemplate='%{y:.0f}<extra></extra>'
+    ))
     
-    fig_tax = px.scatter(acc_data, x='Explainability Score', y='Accuracy (MAPE)', 
-                         color='Group', text='Model', size=[20]*9,
-                         color_discrete_map={'Model 1': '#00CC96', 'Model 2': '#EF553B'})
+    # Forecast mean
+    fig.add_trace(go.Scatter(
+        x=future_dates, y=future_preds['mean'],
+        name='Most Likely', line=dict(color='#00CC96', width=4),
+        hovertemplate='%{y:.0f}<extra></extra>'
+    ))
     
-    fig_tax.update_traces(textposition='top center')
-    fig_tax.update_layout(
-        title="The Accuracy Tax Trade-Off",
-        xaxis_title="Explainability (Higher is Easier to Explain)",
-        yaxis_title="Error Rate (Lower is Better)",
-        template="plotly_dark",
-        shapes=[
-            # Highlight the trade-off zone
-            dict(type="rect", x0=0, y0=0, x1=3, y1=7, line_color="yellow", fillcolor="yellow", opacity=0.1)
-        ]
+    # 68% confidence band
+    fig.add_trace(go.Scatter(
+        x=future_dates, y=future_preds['ci_68'][1],
+        fill=None, mode='lines', line_color='rgba(0,204,150,0)',
+        showlegend=False, hoverinfo='skip'
+    ))
+    fig.add_trace(go.Scatter(
+        x=future_dates, y=future_preds['ci_68'][0],
+        fill='tonexty', mode='lines', line_color='rgba(0,204,150,0)',
+        name='68% Confidence', fillcolor='rgba(0,204,150,0.3)',
+        hovertemplate='Range: %{y:.0f}<extra></extra>'
+    ))
+    
+    # 95% confidence band
+    fig.add_trace(go.Scatter(
+        x=future_dates, y=future_preds['ci_95'][1],
+        fill=None, mode='lines', line_color='rgba(0,204,150,0)',
+        showlegend=False, hoverinfo='skip'
+    ))
+    fig.add_trace(go.Scatter(
+        x=future_dates, y=future_preds['ci_95'][0],
+        fill='tonexty', mode='lines', line_color='rgba(0,204,150,0)',
+        name='95% Confidence', fillcolor='rgba(0,204,150,0.15)',
+        hovertemplate='Range: %{y:.0f}<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        template='plotly_dark',
+        height=500,
+        hovermode='x unified',
+        showlegend=True
     )
     
-    st.plotly_chart(fig_tax, width='stretch')
-    st.warning("The 'Yellow Zone' is where N-BEATS and N-HiTS live. We accept that they are hard to explain (Low X-axis) because they provide the lowest error (Low Y-axis). If you want to move to the right (higher explainability), you must accept higher error.")
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Interpretation
+    avg_forecast = future_preds['mean'].mean()
+    avg_historical = recent[target_col].tail(30).mean()
+    pct_change = (avg_forecast - avg_historical) / avg_historical * 100
+    
+    ci_width = (future_preds['ci_68'][1].mean() - future_preds['ci_68'][0].mean())
+    confidence_level = "HIGH" if ci_width < avg_forecast * 0.2 else "MEDIUM" if ci_width < avg_forecast * 0.4 else "LOW"
+    
+    if confidence_level == "HIGH":
+        css_class = "confidence-high"
+        emoji = "✅"
+    elif confidence_level == "MEDIUM":
+        css_class = "confidence-medium"
+        emoji = "⚠️"
+    else:
+        css_class = "confidence-low"
+        emoji = "🔴"
+    
+    st.markdown(f"""
+    <div class="{css_class}">
+        <h3>{emoji} Confidence: {confidence_level}</h3>
+        <p><strong>Most Likely Outcome:</strong> {target_col} will average <span class="metric-big">{avg_forecast:.0f}</span> 
+        over the next 30 days ({pct_change:+.1f}% vs recent history)</p>
+        
+        <p><strong>What this means:</strong></p>
+        <ul>
+            <li>There's a 68% chance the actual result will be within ±{ci_width/2:.0f} of this prediction</li>
+            <li>There's a 95% chance it will be within ±{(future_preds['ci_95'][1].mean() - future_preds['ci_95'][0].mean())/2:.0f}</li>
+            <li>The models agree with each other {100 - (future_preds['model_std'].mean()/future_preds['mean'].mean()*100):.0f}% of the time</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Scenario impact
+    if any(v != 0 for v in scenario_changes.values()):
+        st.markdown("### 🎲 Your Scenario Impact")
+        active_changes = {k: v for k, v in scenario_changes.items() if v != 0}
+        for driver, change in active_changes.items():
+            direction = "↑" if change > 0 else "↓"
+            st.markdown(f"- **{driver}** {direction} {abs(change)}%")
 
-# --- TAB 5: FEATURE DECODER ---
-with tab5:
-    st.markdown("""
-    **Stakeholder Question:** *"What do you mean 'Lag_7' is driving the forecast? Speak English."*
+# TAB 2: Historical Precedent
+with tab2:
+    st.markdown("### 🔍 \"When did this happen before, and what happened next?\"")
+    st.markdown("*This is how you build trust without explaining math*")
+    
+    current_window = processed_df.tail(30)
+    matches = find_similar_periods(current_window, processed_df.head(train_size), 
+                                   date_col, target_col, n_matches=3)
+    
+    if matches:
+        for i, match in enumerate(matches):
+            st.markdown(f"""
+            <div class="precedent-card">
+                <h4>📅 Match #{i+1}: {match['start_date'].strftime('%B %Y')} ({match['similarity']*100:.0f}% similar)</h4>
+                <p><strong>What happened then:</strong> {target_col} averaged {match['avg_before']:.0f} during the period, 
+                then changed to {match['avg_after']:.0f} in the following 30 days 
+                (<strong>{match['change_pct']:+.1f}%</strong>)</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Side by side comparison
+            col_a, col_b = st.columns(2)
+            with col_a:
+                fig_before = px.line(match['before'], x=date_col, y=target_col, 
+                                    title="The Similar Period")
+                fig_before.update_layout(template='plotly_dark', height=250, showlegend=False)
+                st.plotly_chart(fig_before, use_container_width=True)
+            
+            with col_b:
+                fig_after = px.line(match['after'], x=date_col, y=target_col,
+                                   title="What Happened After")
+                fig_after.update_layout(template='plotly_dark', height=250, showlegend=False)
+                st.plotly_chart(fig_after, use_container_width=True)
+        
+        avg_change = np.mean([m['change_pct'] for m in matches])
+        st.success(f"""
+        **Historical Pattern:** When conditions looked like this in the past, 
+        {target_col} changed by an average of **{avg_change:+.1f}%** in the following month.
+        """)
+    else:
+        st.info("Not enough historical data to find similar periods.")
+
+# TAB 3: Risk Scenarios
+with tab3:
+    st.markdown("### ⚠️ \"What would have to change for this forecast to be wrong?\"")
+    st.markdown("*Answer the stakeholder's fear, not their question*")
+    
+    scenarios = generate_risk_scenarios(future_preds['mean'].mean(), 
+                                       {d: recent[d].mean() for d in driver_cols},
+                                       driver_cols)
+    
+    # Calculate impact for each scenario
+    scenario_results = []
+    for scenario in scenarios:
+        # Create scenario data
+        scenario_df = future_df.copy()
+        
+        if scenario['driver'] != 'all':
+            base = recent[scenario['driver']].mean()
+            scenario_df[scenario['driver']] = base * (1 + scenario['change']/100)
+        else:
+            for d in driver_cols:
+                base = recent[d].mean()
+                scenario_df[d] = base * (1 + scenario['change']/100)
+        
+        # Recompute features
+        for driver in driver_cols:
+            if scenario['driver'] == driver or scenario['driver'] == 'all':
+                base_val = recent[driver].mean()
+                scenario_df[driver] = base_val * (1 + scenario['change']/100)
+        
+        X_scenario = scenario_df[feature_cols]
+        scenario_pred = ensemble.predict_with_confidence(X_scenario)
+        
+        impact = ((scenario_pred['mean'].mean() - future_preds['mean'].mean()) 
+                 / future_preds['mean'].mean() * 100)
+        
+        scenario_results.append({
+            'name': scenario['name'],
+            'type': scenario['type'],
+            'likelihood': scenario['likelihood'],
+            'impact': impact,
+            'forecast': scenario_pred['mean'].mean()
+        })
+    
+    # Display as cards
+    for result in sorted(scenario_results, key=lambda x: abs(x['impact']), reverse=True):
+        if 'downside' in result['type']:
+            st.markdown(f"""
+            <div class="risk-alert">
+                <h4>🔻 {result['name']}</h4>
+                <p><strong>Likelihood:</strong> {result['likelihood']}</p>
+                <p><strong>Impact on Forecast:</strong> {result['impact']:.1f}%</p>
+                <p><strong>New Forecast:</strong> {result['forecast']:.0f} (vs {future_preds['mean'].mean():.0f} baseline)</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif result['impact'] > 5:
+            st.markdown(f"""
+            <div class="confidence-high">
+                <h4>🔺 {result['name']}</h4>
+                <p><strong>Likelihood:</strong> {result['likelihood']}</p>
+                <p><strong>Impact on Forecast:</strong> +{result['impact']:.1f}%</p>
+                <p><strong>New Forecast:</strong> {result['forecast']:.0f} (vs {future_preds['mean'].mean():.0f} baseline)</p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    st.info("""
+    **How to use this:** Show your boss the downside scenarios. If they can live with the worst case, 
+    they'll trust the forecast. If they can't, you've just identified which driver to focus on.
+    """)
+
+# TAB 4: What Matters
+with tab4:
+    st.markdown("### 🎯 What Actually Drives the Forecast?")
+    
+    importance = ensemble.get_feature_importance()
+    
+    # Translate technical features
+    def translate_feature(feat):
+        if feat in driver_cols:
+            return feat
+        elif 'Lag_1' in feat:
+            return 'Yesterday'
+        elif 'Lag_7' in feat:
+            return 'Last Week'
+        elif 'Lag_28' in feat:
+            return 'Last Month'
+        elif 'RollingMean' in feat:
+            return 'Recent Trend'
+        elif 'RollingStd' in feat:
+            return 'Volatility'
+        elif 'Momentum' in feat:
+            return 'Acceleration'
+        elif 'DayOfWeek' in feat:
+            return 'Day Pattern'
+        elif 'Month' in feat:
+            return 'Seasonal Pattern'
+        else:
+            return feat
+    
+    importance['Business_Name'] = importance['Feature'].apply(translate_feature)
+    
+    # Group and aggregate
+    importance_grouped = importance.groupby('Business_Name')['Importance'].sum().reset_index()
+    importance_grouped = importance_grouped.sort_values('Importance', ascending=False).head(8)
+    
+    fig = px.bar(importance_grouped, x='Importance', y='Business_Name', 
+                 orientation='h', color='Importance',
+                 color_continuous_scale='Teal')
+    fig.update_layout(
+        template='plotly_dark',
+        height=400,
+        showlegend=False,
+        yaxis={'categoryorder':'total ascending'}
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    top_driver = importance_grouped.iloc[0]['Business_Name']
+    st.success(f"""
+    **Bottom Line:** The model pays most attention to **{top_driver}**. 
+    If you want to influence the outcome, start there.
     """)
     
-    feature_data = {
-        "Technical Feature Name": ["Lag_7", "Lag_365", "Rolling_Mean_30", "Rolling_Std_7", "Exp_Moving_Avg"],
-        "Business Translation": ["Same Day Last Week", "Same Day Last Year", "30-Day Trend Base", "Recent Volatility", "Recent Momentum"],
-        "What it tells the model": [
-            "Matches the day-of-week pattern (e.g., high traffic on Fridays).",
-            "Matches the annual seasonality (e.g., Christmas spike).",
-            "Ignores daily noise to find the 'True' demand level.",
-            "Detects if the market is currently chaotic or stable.",
-            "Weights yesterday heavily; assumes recent history is most important."
-        ]
-    }
+    # Model agreement visualization
+    st.markdown("### 🤝 How Much Do the Models Agree?")
     
-    df_features = pd.DataFrame(feature_data)
+    agreement_pct = 100 - (future_preds['model_std'].mean() / future_preds['mean'].mean() * 100)
     
-    # Simple table styling
-    st.table(df_features)
+    fig_agree = go.Figure()
     
-    st.info("💡 **Pro Tip:** Never show the 'Technical Feature Name' to a stakeholder. Always alias your feature importance charts with the 'Business Translation'.")
+    for i, (name, preds) in enumerate(zip(['GradientBoost', 'RandomForest', 'Ridge'], 
+                                          future_preds['model_predictions'])):
+        fig_agree.add_trace(go.Scatter(
+            x=future_dates, y=preds,
+            name=name, mode='lines',
+            line=dict(width=2),
+            hovertemplate=f'{name}: %{{y:.0f}}<extra></extra>'
+        ))
+    
+    fig_agree.update_layout(
+        template='plotly_dark',
+        height=350,
+        title=f"Model Agreement: {agreement_pct:.0f}%"
+    )
+    st.plotly_chart(fig_agree, use_container_width=True)
+    
+    if agreement_pct > 90:
+        st.success("✅ **High Agreement**: All models see the same pattern. This forecast is reliable.")
+    elif agreement_pct > 75:
+        st.warning("⚠️ **Moderate Agreement**: Some divergence between models. Check risk scenarios.")
+    else:
+        st.error("🔴 **Low Agreement**: Models disagree significantly. High uncertainty - plan for multiple outcomes.")
+
+st.divider()
+st.markdown("""
+### 💡 How to Use This With Stakeholders
+
+1. **Start with Tab 1** - Show the confidence bands, not just the line
+2. **Go to Tab 2** - Say "This happened 3 times before, here's what happened next"
+3. **Address fears in Tab 3** - "For this to be wrong, X would have to happen"
+4. **Only use Tab 4** if they ask - Most stakeholders don't care about feature importance
+
+**Remember:** They don't want to understand the model. They want to know if they can bet their bonus on it.
+""")
