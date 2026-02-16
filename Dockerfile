@@ -18,16 +18,10 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Create a non-privileged user that the app will run under.
-# See https://docs.docker.com/go/dockerfile-user-best-practices/
-ARG UID=10001
 RUN adduser \
     --disabled-password \
     --gecos "" \
     --home "/home/appuser" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
     appuser
 
 # Download dependencies as a separate step to take advantage of Docker's caching.

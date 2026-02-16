@@ -13,15 +13,7 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# =============================================================================
-# PHASE 4: THE CONFIDENCE TRANSLATOR
-# 
-# Philosophy: Stop explaining "why the model thinks X" and start explaining
-# "what would have to change for this forecast to be wrong" and 
-# "here's what happened last time the data looked like this"
-# =============================================================================
-
-st.set_page_config(page_title="Phase 4: Confidence Translator", layout="wide", page_icon="🎯")
+st.set_page_config(page_title="Explainable Forecasting", layout="wide")
 
 st.markdown("""
 <style>
@@ -380,7 +372,7 @@ def generate_risk_scenarios(base_forecast, drivers_current, driver_cols):
 
 # Sidebar
 with st.sidebar:
-    st.title("🎯 Setup")
+    st.title("Setup")
     
     uploaded = st.file_uploader("Upload CSV (optional)", type=['csv'])
     raw_df = load_user_data(uploaded)
@@ -399,8 +391,8 @@ with st.sidebar:
         st.stop()
     
     numeric_cols = raw_df.select_dtypes(include=np.number).columns.tolist()
-    target_col = st.selectbox("Target (What to Forecast)", numeric_cols)
-    driver_cols = st.multiselect("Drivers (What Influences Target)", 
+    target_col = st.selectbox("Forecast Variable", numeric_cols)
+    driver_cols = st.multiselect("Influential Factors (Drivers)", 
                                  [c for c in numeric_cols if c != target_col],
                                  default=[c for c in numeric_cols if c != target_col][:2])
     
@@ -409,7 +401,7 @@ with st.sidebar:
         st.stop()
     
     st.markdown("---")
-    st.markdown("### 🎲 Scenario Builder")
+    st.markdown("### Scenario Planning")
     scenario_changes = {}
     for driver in driver_cols:
         scenario_changes[driver] = st.slider(
@@ -418,7 +410,7 @@ with st.sidebar:
         )
 
 # Train model
-with st.spinner("🧠 Training ensemble..."):
+with st.spinner("Training models..."):
     processed_df, feature_cols = engineer_features(raw_df, date_col, target_col, driver_cols)
     
     # Split
@@ -441,8 +433,7 @@ with st.spinner("🧠 Training ensemble..."):
     mae = mean_absolute_error(y_test, test_preds['mean'])
 
 # Header
-st.title(f"🎯 Forecast: {target_col}")
-st.markdown(f"**Philosophy:** We don't explain *why* the model thinks something. We explain *what would have to change* for it to be wrong.")
+st.title(f"Forecast: {target_col}")
 
 # Top metrics
 col1, col2, col3, col4 = st.columns(4)
@@ -465,15 +456,14 @@ st.divider()
 
 # Main tabs
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Forecast with Confidence Bands",
+    "📈 Forecast",
     "🔍 Historical Precedent",
     "⚠️ Risk Scenarios",
-    "🎯 What Matters Most"
+    "🎯 Forecast Drivers"
 ])
 
 # TAB 1: Forecast
 with tab1:
-    st.markdown("### The forecast is a RANGE, not a single number")
     
     # Generate future forecast
     last_date = processed_df[date_col].max()
@@ -565,7 +555,7 @@ with tab1:
         showlegend=True
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     # Interpretation
     avg_forecast = future_preds['mean'].mean()
@@ -576,33 +566,21 @@ with tab1:
     confidence_level = "HIGH" if ci_width < avg_forecast * 0.2 else "MEDIUM" if ci_width < avg_forecast * 0.4 else "LOW"
     
     if confidence_level == "HIGH":
-        css_class = "confidence-high"
         emoji = "✅"
     elif confidence_level == "MEDIUM":
-        css_class = "confidence-medium"
         emoji = "⚠️"
     else:
-        css_class = "confidence-low"
         emoji = "🔴"
     
-    st.markdown(f"""
-    <div class="{css_class}">
-        <h3>{emoji} Confidence: {confidence_level}</h3>
-        <p><strong>Most Likely Outcome:</strong> {target_col} will average <span class="metric-big">{avg_forecast:.0f}</span> 
-        over the next 30 days ({pct_change:+.1f}% vs recent history)</p>
-        
-        <p><strong>What this means:</strong></p>
-        <ul>
-            <li>There's a 68% chance the actual result will be within ±{ci_width/2:.0f} of this prediction</li>
-            <li>There's a 95% chance it will be within ±{(future_preds['ci_95'][1].mean() - future_preds['ci_95'][0].mean())/2:.0f}</li>
-            <li>The models agree with each other {100 - (future_preds['model_std'].mean()/future_preds['mean'].mean()*100):.0f}% of the time</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
+    st.markdown(f"{emoji} Confidence: {confidence_level}")
+    st.markdown(f"**Most Likely Outcome:** {target_col} will average **{avg_forecast:.0f}** over the next 30 days ({pct_change:+.1f}% vs recent history)")
+    st.markdown(f"**What this means**:")
+    st.markdown(f"* There's a 68% chance the actual result will be within ±{ci_width/2:.0f} of this prediction")
+    st.markdown(f"* There's a 95% chance it will be within ±{(future_preds['ci_95'][1].mean() - future_preds['ci_95'][0].mean())/2:.0f}")
+
     # Scenario impact
     if any(v != 0 for v in scenario_changes.values()):
-        st.markdown("### 🎲 Your Scenario Impact")
+        st.markdown("### 🎲 Scenario Impact")
         active_changes = {k: v for k, v in scenario_changes.items() if v != 0}
         for driver, change in active_changes.items():
             direction = "↑" if change > 0 else "↓"
@@ -611,7 +589,6 @@ with tab1:
 # TAB 2: Historical Precedent
 with tab2:
     st.markdown("### 🔍 \"When did this happen before, and what happened next?\"")
-    st.markdown("*This is how you build trust without explaining math*")
     
     current_window = processed_df.tail(30)
     matches = find_similar_periods(current_window, processed_df.head(train_size), 
@@ -621,7 +598,7 @@ with tab2:
         for i, match in enumerate(matches):
             st.markdown(f"""
             <div class="precedent-card">
-                <h4>📅 Match #{i+1}: {match['start_date'].strftime('%B %Y')} ({match['similarity']*100:.0f}% similar)</h4>
+                <h4>📅 Match #{i+1}: {match['start_date'].strftime('%B %Y')} ({match['similarity']*100:.0f}% similarity)</h4>
                 <p><strong>What happened then:</strong> {target_col} averaged {match['avg_before']:.0f} during the period, 
                 then changed to {match['avg_after']:.0f} in the following 30 days 
                 (<strong>{match['change_pct']:+.1f}%</strong>)</p>
@@ -634,13 +611,13 @@ with tab2:
                 fig_before = px.line(match['before'], x=date_col, y=target_col, 
                                     title="The Similar Period")
                 fig_before.update_layout(template='plotly_dark', height=250, showlegend=False)
-                st.plotly_chart(fig_before, use_container_width=True)
+                st.plotly_chart(fig_before, width='stretch')
             
             with col_b:
                 fig_after = px.line(match['after'], x=date_col, y=target_col,
                                    title="What Happened After")
                 fig_after.update_layout(template='plotly_dark', height=250, showlegend=False)
-                st.plotly_chart(fig_after, use_container_width=True)
+                st.plotly_chart(fig_after, width='stretch')
         
         avg_change = np.mean([m['change_pct'] for m in matches])
         st.success(f"""
@@ -653,7 +630,6 @@ with tab2:
 # TAB 3: Risk Scenarios
 with tab3:
     st.markdown("### ⚠️ \"What would have to change for this forecast to be wrong?\"")
-    st.markdown("*Answer the stakeholder's fear, not their question*")
     
     scenarios = generate_risk_scenarios(future_preds['mean'].mean(), 
                                        {d: recent[d].mean() for d in driver_cols},
@@ -713,15 +689,10 @@ with tab3:
                 <p><strong>New Forecast:</strong> {result['forecast']:.0f} (vs {future_preds['mean'].mean():.0f} baseline)</p>
             </div>
             """, unsafe_allow_html=True)
-    
-    st.info("""
-    **How to use this:** Show your boss the downside scenarios. If they can live with the worst case, 
-    they'll trust the forecast. If they can't, you've just identified which driver to focus on.
-    """)
 
-# TAB 4: What Matters
+# TAB 4: Forecast Drivers
 with tab4:
-    st.markdown("### 🎯 What Actually Drives the Forecast?")
+    st.markdown("### 🎯 Forecast Drivers")
     
     importance = ensemble.get_feature_importance()
     
@@ -763,7 +734,7 @@ with tab4:
         showlegend=False,
         yaxis={'categoryorder':'total ascending'}
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     top_driver = importance_grouped.iloc[0]['Business_Name']
     st.success(f"""
@@ -772,7 +743,7 @@ with tab4:
     """)
     
     # Model agreement visualization
-    st.markdown("### 🤝 How Much Do the Models Agree?")
+    st.markdown("### How Much Do the Models Agree?")
     
     agreement_pct = 100 - (future_preds['model_std'].mean() / future_preds['mean'].mean() * 100)
     
@@ -792,7 +763,7 @@ with tab4:
         height=350,
         title=f"Model Agreement: {agreement_pct:.0f}%"
     )
-    st.plotly_chart(fig_agree, use_container_width=True)
+    st.plotly_chart(fig_agree, width='stretch')
     
     if agreement_pct > 90:
         st.success("✅ **High Agreement**: All models see the same pattern. This forecast is reliable.")
@@ -800,15 +771,3 @@ with tab4:
         st.warning("⚠️ **Moderate Agreement**: Some divergence between models. Check risk scenarios.")
     else:
         st.error("🔴 **Low Agreement**: Models disagree significantly. High uncertainty - plan for multiple outcomes.")
-
-st.divider()
-st.markdown("""
-### 💡 How to Use This With Stakeholders
-
-1. **Start with Tab 1** - Show the confidence bands, not just the line
-2. **Go to Tab 2** - Say "This happened 3 times before, here's what happened next"
-3. **Address fears in Tab 3** - "For this to be wrong, X would have to happen"
-4. **Only use Tab 4** if they ask - Most stakeholders don't care about feature importance
-
-**Remember:** They don't want to understand the model. They want to know if they can bet their bonus on it.
-""")
