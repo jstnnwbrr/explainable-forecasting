@@ -3,3 +3,9 @@ pandas
 numpy
 plotly
 scikit-learn
+statsmodels
+pmdarima
+openpyxl
+neuralforecast
+prophet
+scipy

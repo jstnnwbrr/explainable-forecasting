@@ -4,364 +4,567 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler
+from neuralforecast import NeuralForecast
+from neuralforecast.models import NBEATS, NHITS
+from prophet import Prophet
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 from sklearn.metrics import mean_absolute_percentage_error, mean_absolute_error
-from scipy import stats
+from sklearn.neural_network import MLPRegressor
+from sklearn.linear_model import ElasticNet, PassiveAggressiveRegressor, TheilSenRegressor
+from statsmodels.tsa.seasonal import STL
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from pmdarima import auto_arima
+from scipy import signal
+from scipy.fft import fft, fftfreq
 import warnings
+import sys
+import subprocess
 
 warnings.filterwarnings('ignore')
+
+# =============================================================================
+# CONFIG
+# =============================================================================
 
 st.set_page_config(page_title="Explainable Forecasting", layout="wide")
 
 st.markdown("""
 <style>
     .main { background-color: #0E1117; }
-    h1, h2, h3 { color: #FAFAFA; font-family: 'Helvetica Neue', sans-serif; }
-    
+    h1, h2, h3 { color: #FAFAFA; }
     .confidence-high {
-        background: linear-gradient(135deg, #1e3a20 0%, #2d5a2f 100%);
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #4CAF50;
-        margin: 10px 0;
+        background: linear-gradient(135deg, #1e3a20, #2d5a2f);
+        padding: 20px; border-radius: 10px; border-left: 5px solid #4CAF50;
     }
-    
     .confidence-medium {
-        background: linear-gradient(135deg, #3a3520 0%, #5a4f2f 100%);
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #FFA726;
-        margin: 10px 0;
+        background: linear-gradient(135deg, #3a3520, #5a4f2f);
+        padding: 20px; border-radius: 10px; border-left: 5px solid #FFA726;
     }
-    
     .confidence-low {
-        background: linear-gradient(135deg, #3a2020 0%, #5a2f2f 100%);
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #EF5350;
-        margin: 10px 0;
+        background: linear-gradient(135deg, #3a2020, #5a2f2f);
+        padding: 20px; border-radius: 10px; border-left: 5px solid #EF5350;
     }
-    
     .precedent-card {
-        background-color: #1a1f2e;
-        padding: 15px;
-        border-radius: 8px;
-        border: 2px solid #3b82f6;
-        margin: 10px 0;
+        background-color: #1a1f2e; padding: 15px; border-radius: 8px;
+        border: 2px solid #3b82f6; margin: 10px 0;
     }
-    
     .risk-alert {
-        background-color: #2d1b1b;
-        padding: 15px;
-        border-radius: 8px;
+        background-color: #2d1b1b; padding: 15px; border-radius: 8px;
         border-left: 4px solid #dc2626;
-        margin: 10px 0;
-    }
-    
-    .metric-big {
-        font-size: 2.5em;
-        font-weight: bold;
-        color: #00CC96;
-    }
-    
-    .stMetric {
-        background-color: #1a1f2e;
-        padding: 15px;
-        border-radius: 8px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# DATA GENERATION & LOADING
+# DATA LOADING
 # =============================================================================
 
-@st.cache_data
-def generate_synthetic_data():
-    """Enhanced synthetic data with realistic patterns"""
-    np.random.seed(42)
-    n_days = 730
-    dates = pd.date_range(start="2023-01-01", periods=n_days, freq="D")
-    
-    # Features
-    price = 100 + np.random.normal(0, 5, n_days).cumsum() * 0.1
-    price = np.clip(price, 85, 115)
-    
-    marketing = 1000 + np.random.normal(0, 200, n_days).cumsum() * 0.5
-    marketing = np.clip(marketing, 500, 3000)
-    
-    competitor_promo = np.random.choice([0, 1], size=n_days, p=[0.92, 0.08])
-    
-    # Complex realistic patterns
-    t = np.arange(n_days)
-    trend = 0.08 * t
-    weekly = 25 * np.sin(2 * np.pi * t / 7)
-    monthly = 15 * np.sin(2 * np.pi * t / 30)
-    annual = 40 * np.sin(2 * np.pi * t / 365)
-    
-    # Non-linear interactions
-    base = 500
-    sales = (base + trend + weekly + monthly + annual 
-             - 2.8 * (price - 100) 
-             + 0.15 * np.sqrt(marketing)
-             - 45 * competitor_promo
-             + 0.01 * (price - 100) * marketing / 1000  # Interaction
-             + np.random.normal(0, 5, n_days))
-    
-    return pd.DataFrame({
-        'Date': dates,
-        'Sales': sales,
-        'Price': price,
-        'Marketing': marketing,
-        'Competitor_Promo': competitor_promo
-    })
-
-def load_user_data(file):
-    """Load and validate user data"""
+def load_data(file):
+    """Load CSV or Excel"""
     if file is None:
-        return generate_synthetic_data()
+        return None
     
     try:
-        df = pd.read_csv(file)
+        name = file.name.lower()
+        df = pd.read_excel(file) if name.endswith(('.xlsx', '.xls')) else pd.read_csv(file)
+        
+        # Auto-convert dates
         for col in df.columns:
-            if 'date' in col.lower():
-                df[col] = pd.to_datetime(df[col])
+            if 'date' in col.lower() or 'time' in col.lower():
+                try:
+                    df[col] = pd.to_datetime(df[col])
+                except:
+                    pass
+        
         return df
     except Exception as e:
-        st.error(f"Error: {e}")
-        return generate_synthetic_data()
+        st.error(f"Error loading: {e}")
+        return None
+
+# =============================================================================
+# INTELLIGENT SEASONALITY DETECTION
+# =============================================================================
+
+def detect_seasonality(series, date_col_freq='D'):
+    """
+    Detect dominant seasonality using spectral analysis.
+    Returns best period for decomposition.
+    """
+    try:
+        # Remove trend via differencing
+        detrended = np.diff(series.dropna())
+        
+        # FFT
+        n = len(detrended)
+        yf = fft(detrended)
+        xf = fftfreq(n, 1)
+        
+        # Power spectrum
+        power = np.abs(yf[:n//2])**2
+        freqs = xf[:n//2]
+        
+        # Find peaks
+        peaks, _ = signal.find_peaks(power, height=np.mean(power))
+        
+        if len(peaks) == 0:
+            # Default to weekly for daily data
+            return 7 if date_col_freq == 'D' else 12
+        
+        # Get dominant frequency
+        dominant_idx = peaks[np.argmax(power[peaks])]
+        dominant_freq = freqs[dominant_idx]
+        
+        if dominant_freq == 0:
+            return 7 if date_col_freq == 'D' else 12
+        
+        # Convert frequency to period
+        period = int(1 / dominant_freq)
+        
+        # Reasonable bounds
+        if date_col_freq == 'D':
+            period = np.clip(period, 7, 365)  # Weekly to yearly
+        else:
+            period = np.clip(period, 4, 52)  # Quarterly to yearly
+        
+        return period
+    
+    except:
+        # Fallback
+        return 7 if date_col_freq == 'D' else 12
+
+def decompose_series(df, date_col, target_col):
+    """Decompose with intelligent seasonality detection"""
+    try:
+        df_sorted = df.sort_values(date_col).reset_index(drop=True)
+        series = df_sorted[target_col].values
+        
+        # Detect seasonality
+        period = detect_seasonality(pd.Series(series))
+        
+        st.info(f"🔍 Detected seasonality period: {period} (likely {'weekly' if period == 7 else 'monthly' if period == 30 else 'quarterly' if period == 90 else 'yearly' if period == 365 else 'custom'})")
+        
+        # STL decomposition
+        stl = STL(series, seasonal=period, robust=True)
+        result = stl.fit()
+        
+        return pd.DataFrame({
+            date_col: df_sorted[date_col],
+            'Observed': series,
+            'Trend': result.trend,
+            'Seasonal': result.seasonal,
+            'Residual': result.resid
+        }), period
+    
+    except Exception as e:
+        st.warning(f"Decomposition failed: {e}")
+        return None, None
 
 # =============================================================================
 # FEATURE ENGINEERING
 # =============================================================================
 
 def engineer_features(df, date_col, target_col, driver_cols):
-    """Create time series features"""
+    """Create comprehensive features"""
     df = df.sort_values(date_col).reset_index(drop=True).copy()
     
-    # Time features
+    # Calendar
     df['DayOfWeek'] = df[date_col].dt.dayofweek
     df['Month'] = df[date_col].dt.month
     df['Quarter'] = df[date_col].dt.quarter
     df['IsWeekend'] = (df['DayOfWeek'] >= 5).astype(int)
     df['DayOfMonth'] = df[date_col].dt.day
+    df['DayOfYear'] = df[date_col].dt.dayofyear
     
-    # Cyclical encoding
+    # Cyclical
     df['DayOfWeek_Sin'] = np.sin(2 * np.pi * df['DayOfWeek'] / 7)
     df['DayOfWeek_Cos'] = np.cos(2 * np.pi * df['DayOfWeek'] / 7)
     df['Month_Sin'] = np.sin(2 * np.pi * df['Month'] / 12)
     df['Month_Cos'] = np.cos(2 * np.pi * df['Month'] / 12)
     
-    # Lags and rolling features
+    # Lags
     for lag in [1, 7, 14, 28]:
         df[f'Lag_{lag}'] = df[target_col].shift(lag)
     
+    # Rolling
     for window in [7, 14, 28]:
         df[f'RollingMean_{window}'] = df[target_col].rolling(window).mean().shift(1)
         df[f'RollingStd_{window}'] = df[target_col].rolling(window).std().shift(1)
     
     # Momentum
     df['Momentum_7'] = df[target_col].diff(7)
+    df['Acceleration_7'] = df['Momentum_7'].diff(7)
+    
+    # EMA
+    df['EMA_7'] = df[target_col].ewm(span=7).mean().shift(1)
+    df['EMA_28'] = df[target_col].ewm(span=28).mean().shift(1)
     
     df = df.dropna().reset_index(drop=True)
     
-    engineered = ['DayOfWeek', 'Month', 'Quarter', 'IsWeekend', 'DayOfMonth',
-                  'DayOfWeek_Sin', 'DayOfWeek_Cos', 'Month_Sin', 'Month_Cos',
-                  'Lag_1', 'Lag_7', 'Lag_14', 'Lag_28',
-                  'RollingMean_7', 'RollingMean_14', 'RollingMean_28',
-                  'RollingStd_7', 'RollingStd_14', 'RollingStd_28',
-                  'Momentum_7']
+    engineered = [
+        'DayOfWeek', 'Month', 'Quarter', 'IsWeekend', 'DayOfMonth', 'DayOfYear',
+        'DayOfWeek_Sin', 'DayOfWeek_Cos', 'Month_Sin', 'Month_Cos',
+        'Lag_1', 'Lag_7', 'Lag_14', 'Lag_28',
+        'RollingMean_7', 'RollingMean_14', 'RollingMean_28',
+        'RollingStd_7', 'RollingStd_14', 'RollingStd_28',
+        'Momentum_7', 'Acceleration_7',
+        'EMA_7', 'EMA_28'
+    ]
     
-    return df, driver_cols + engineered
+    available_drivers = [d for d in driver_cols if d in df.columns]
+    
+    return df, available_drivers + engineered
+
+def create_future_features(future_df, recent_history, date_col, target_col, driver_cols, feature_cols):
+    """
+    CRITICAL: Properly reconstruct ALL features for future dates.
+    This fixes the KeyError bug.
+    """
+    # Calendar features (can be calculated from dates)
+    future_df['DayOfWeek'] = future_df[date_col].dt.dayofweek
+    future_df['Month'] = future_df[date_col].dt.month
+    future_df['Quarter'] = future_df[date_col].dt.quarter
+    future_df['IsWeekend'] = (future_df['DayOfWeek'] >= 5).astype(int)
+    future_df['DayOfMonth'] = future_df[date_col].dt.day
+    future_df['DayOfYear'] = future_df[date_col].dt.dayofyear
+    
+    # Cyclical encoding
+    future_df['DayOfWeek_Sin'] = np.sin(2 * np.pi * future_df['DayOfWeek'] / 7)
+    future_df['DayOfWeek_Cos'] = np.cos(2 * np.pi * future_df['DayOfWeek'] / 7)
+    future_df['Month_Sin'] = np.sin(2 * np.pi * future_df['Month'] / 12)
+    future_df['Month_Cos'] = np.cos(2 * np.pi * future_df['Month'] / 12)
+    
+    # For lag features, use recent history
+    # This is an approximation for forecasting
+    for lag in [1, 7, 14, 28]:
+        # Use rolling average from recent history as proxy
+        if len(recent_history) >= lag:
+            future_df[f'Lag_{lag}'] = recent_history[target_col].iloc[-lag:].mean()
+        else:
+            future_df[f'Lag_{lag}'] = recent_history[target_col].mean()
+    
+    # Rolling statistics - use recent values
+    for window in [7, 14, 28]:
+        if len(recent_history) >= window:
+            future_df[f'RollingMean_{window}'] = recent_history[target_col].tail(window).mean()
+            future_df[f'RollingStd_{window}'] = recent_history[target_col].tail(window).std()
+        else:
+            future_df[f'RollingMean_{window}'] = recent_history[target_col].mean()
+            future_df[f'RollingStd_{window}'] = recent_history[target_col].std()
+    
+    # Momentum and acceleration - use recent trends
+    if 'Momentum_7' in recent_history.columns:
+        future_df['Momentum_7'] = recent_history['Momentum_7'].tail(7).mean()
+        future_df['Acceleration_7'] = recent_history['Acceleration_7'].tail(7).mean()
+    else:
+        # Fallback
+        future_df['Momentum_7'] = 0
+        future_df['Acceleration_7'] = 0
+    
+    # EMA - use recent values
+    if 'EMA_7' in recent_history.columns:
+        future_df['EMA_7'] = recent_history['EMA_7'].iloc[-1]
+        future_df['EMA_28'] = recent_history['EMA_28'].iloc[-1]
+    else:
+        future_df['EMA_7'] = recent_history[target_col].tail(7).mean()
+        future_df['EMA_28'] = recent_history[target_col].tail(28).mean()
+    
+    # Ensure all feature_cols exist
+    for col in feature_cols:
+        if col not in future_df.columns:
+            # If still missing, use mean from recent history
+            if col in recent_history.columns:
+                future_df[col] = recent_history[col].mean()
+            else:
+                future_df[col] = 0
+    
+    return future_df
 
 # =============================================================================
-# ENSEMBLE MODELING WITH CONFIDENCE INTERVALS
+# ENSEMBLE MODEL
 # =============================================================================
 
-class ConfidenceEnsemble:
-    """
-    Ensemble that provides not just predictions but confidence intervals
-    based on model agreement and historical errors
-    """
+class ProductionEnsemble:
+    """10-model ensemble with confidence intervals"""
     
     def __init__(self):
-        self.models = {
-            'GradientBoost': GradientBoostingRegressor(n_estimators=200, max_depth=5, learning_rate=0.05, random_state=42),
-            'RandomForest': RandomForestRegressor(n_estimators=200, max_depth=15, random_state=42),
-            'Ridge': Ridge(alpha=1.0)
-        }
+        self.models = {}
+        self.model_predictions = {}
         self.scaler = StandardScaler()
+        self.poly_features = PolynomialFeatures(degree=2, include_bias=False)
         self.feature_names = None
-        self.historical_errors = None
+        self.historical_errors = []
+        self.target_col = None
         
-    def fit(self, X, y, feature_names):
-        self.feature_names = feature_names
+    def fit(self, df, date_col, target_col, feature_cols):
+        """Train all models"""
+        self.target_col = target_col
+        self.feature_names = feature_cols
+        
+        X = df[feature_cols].values
+        y = df[target_col].values
+        dates = df[date_col].values
+        
         X_scaled = self.scaler.fit_transform(X)
+        all_preds = []
         
-        # Train all models
-        predictions = []
-        for name, model in self.models.items():
-            if name == 'Ridge':
+        # 6. ElasticNet
+        try:
+            with st.spinner("Training ElasticNet..."):
+                model = ElasticNet(alpha=0.1, l1_ratio=0.5, max_iter=5000, random_state=42)
                 model.fit(X_scaled, y)
                 pred = model.predict(X_scaled)
-            else:
-                model.fit(X, y)
-                pred = model.predict(X)
-            predictions.append(pred)
+                self.models['ElasticNet'] = model
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"ElasticNet failed: {e}")
         
-        # Calculate historical errors for each model
-        predictions = np.array(predictions)
-        ensemble_pred = predictions.mean(axis=0)
-        self.historical_errors = y - ensemble_pred
+        # 7. PassiveAggressive
+        try:
+            with st.spinner("Training PassiveAggressive..."):
+                model = PassiveAggressiveRegressor(max_iter=1000, random_state=42)
+                model.fit(X_scaled, y)
+                pred = model.predict(X_scaled)
+                self.models['PassiveAggressive'] = model
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"PassiveAggressive failed: {e}")
+        
+        # 8. Polynomial Regression
+        try:
+            with st.spinner("Training Polynomial..."):
+                X_subset = X[:, :min(5, X.shape[1])]
+                X_poly = self.poly_features.fit_transform(X_subset)
+                
+                from sklearn.linear_model import Ridge
+                model = Ridge(alpha=1.0)
+                model.fit(X_poly, y)
+                pred = model.predict(X_poly)
+                self.models['Polynomial'] = model
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"Polynomial failed: {e}")
+        
+        # 9. TheilSen
+        try:
+            with st.spinner("Training TheilSen..."):
+                sample_size = min(500, len(X))
+                idx = np.random.choice(len(X), sample_size, replace=False)
+                
+                model = TheilSenRegressor(random_state=42, max_iter=300, n_jobs=-1)
+                model.fit(X_scaled[idx], y[idx])
+                pred = model.predict(X_scaled)
+                self.models['TheilSen'] = model
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"TheilSen failed: {e}")
+        
+        # 10. MLP
+        try:
+            with st.spinner("Training MLP..."):
+                model = MLPRegressor(
+                    hidden_layer_sizes=(100, 50),
+                    max_iter=500,
+                    early_stopping=True,
+                    random_state=42
+                )
+                model.fit(X_scaled, y)
+                pred = model.predict(X_scaled)
+                self.models['MLP'] = model
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"MLP failed: {e}")
+        
+        # 4. Auto-ARIMA
+        try:
+            with st.spinner("Training Auto-ARIMA..."):
+                model = auto_arima(
+                    y,
+                    seasonal=True, m=7,
+                    max_p=3, max_q=3,
+                    trace=False,
+                    error_action='ignore',
+                    suppress_warnings=True,
+                    stepwise=True
+                )
+                pred = model.predict_in_sample()
+                self.models['AutoARIMA'] = model
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"Auto-ARIMA failed: {e}")
+        
+        # 5. Exponential Smoothing
+        try:
+            with st.spinner("Training ExpSmoothing..."):
+                y_pos = y - y.min() + 1 if y.min() <= 0 else y
+                
+                model = ExponentialSmoothing(
+                    y_pos,
+                    seasonal_periods=7,
+                    trend='add',
+                    seasonal='add'
+                )
+                fit = model.fit()
+                pred = fit.fittedvalues
+                
+                if y.min() <= 0:
+                    pred = pred + y.min() - 1
+                
+                self.models['ExpSmoothing'] = fit
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"ExpSmoothing failed: {e}")
+        
+        # 3. Prophet
+        try:
+            with st.spinner("Training Prophet..."):
+                prophet_df = pd.DataFrame({'ds': dates, 'y': y})
+                
+                model = Prophet(
+                    yearly_seasonality=True,
+                    weekly_seasonality=True,
+                    daily_seasonality=False
+                )
+                model.fit(prophet_df)
+                forecast = model.predict(prophet_df)
+                pred = forecast['yhat'].values
+                
+                self.models['Prophet'] = model
+                all_preds.append(pred)
+        except Exception as e:
+            st.warning(f"Prophet failed: {e}")
+        
+        # Calculate ensemble
+        if all_preds:
+            all_preds = np.array(all_preds)
+            ensemble_pred = np.mean(all_preds, axis=0)
+            self.historical_errors = y - ensemble_pred
+            
+            for i, name in enumerate(list(self.models.keys())[:len(all_preds)]):
+                self.model_predictions[name] = all_preds[i]
+        
+        st.success(f"✓ {len(self.models)} models trained successfully")
         
         return self
     
-    def predict_with_confidence(self, X):
-        """Returns mean prediction, std, and confidence intervals"""
+    def predict_with_confidence(self, future_df, feature_cols):
+        """Predict with confidence intervals"""
+        X_future = future_df[feature_cols].values
+        X_future_scaled = self.scaler.transform(X_future)
+        
         predictions = []
         
-        for name, model in self.models.items():
-            if name == 'Ridge':
-                X_scaled = self.scaler.transform(X)
-                pred = model.predict(X_scaled)
-            else:
-                pred = model.predict(X)
+        # Regression models
+        for name in ['ElasticNet', 'PassiveAggressive', 'TheilSen', 'MLP']:
+            if name in self.models:
+                pred = self.models[name].predict(X_future_scaled)
+                predictions.append(pred)
+        
+        # Polynomial
+        if 'Polynomial' in self.models:
+            X_subset = X_future[:, :min(5, X_future.shape[1])]
+            X_poly = self.poly_features.transform(X_subset)
+            pred = self.models['Polynomial'].predict(X_poly)
             predictions.append(pred)
+        
+        # Time series
+        if 'AutoARIMA' in self.models:
+            pred = self.models['AutoARIMA'].predict(n_periods=len(future_df))
+            predictions.append(pred)
+        
+        if 'ExpSmoothing' in self.models:
+            pred = self.models['ExpSmoothing'].forecast(steps=len(future_df))
+            predictions.append(pred)
+        
+        if 'Prophet' in self.models:
+            prophet_future = pd.DataFrame({'ds': future_df[future_df.columns[0]].values})
+            forecast = self.models['Prophet'].predict(prophet_future)
+            pred = forecast['yhat'].values
+            predictions.append(pred)
+        
+        if not predictions:
+            st.error("No models succeeded!")
+            return None
         
         predictions = np.array(predictions)
         
-        # Ensemble mean
-        mean_pred = predictions.mean(axis=0)
-        
-        # Model disagreement (variance across models)
-        model_std = predictions.std(axis=0)
-        
-        # Historical error distribution
+        mean_pred = np.mean(predictions, axis=0)
+        model_std = np.std(predictions, axis=0)
         error_std = np.std(self.historical_errors)
         
-        # Combined confidence interval
-        # 68% confidence (1 sigma)
-        ci_68_lower = mean_pred - (model_std + error_std)
-        ci_68_upper = mean_pred + (model_std + error_std)
-        
-        # 95% confidence (2 sigma)
-        ci_95_lower = mean_pred - 2 * (model_std + error_std)
-        ci_95_upper = mean_pred + 2 * (model_std + error_std)
+        total_std = np.sqrt(model_std**2 + error_std**2)
         
         return {
             'mean': mean_pred,
             'model_std': model_std,
             'error_std': error_std,
-            'ci_68': (ci_68_lower, ci_68_upper),
-            'ci_95': (ci_95_lower, ci_95_upper),
+            'ci_68': (mean_pred - total_std, mean_pred + total_std),
+            'ci_95': (mean_pred - 2*total_std, mean_pred + 2*total_std),
             'model_predictions': predictions
         }
-    
-    def get_feature_importance(self):
-        """Get feature importance from tree-based models"""
-        # Average importance across tree models
-        gb_importance = self.models['GradientBoost'].feature_importances_
-        rf_importance = self.models['RandomForest'].feature_importances_
-        
-        avg_importance = (gb_importance + rf_importance) / 2
-        
-        return pd.DataFrame({
-            'Feature': self.feature_names,
-            'Importance': avg_importance
-        }).sort_values('Importance', ascending=False)
 
 # =============================================================================
-# HISTORICAL PRECEDENT FINDER
+# HELPER FUNCTIONS
 # =============================================================================
 
-def find_similar_periods(current_pattern, historical_data, date_col, target_col, n_matches=3):
-    """
-    Find historical periods that looked similar to current conditions
-    Returns what happened AFTER those similar periods
-    """
+def find_similar_periods(current, historical, date_col, target_col, n=3):
+    """Find similar historical periods"""
     from sklearn.metrics.pairwise import cosine_similarity
     
-    window_size = len(current_pattern)
-    historical_windows = []
-    start_indices = []
-    
-    # Create sliding windows
-    for i in range(len(historical_data) - window_size - 30):  # -30 to see what happened after
-        window = historical_data.iloc[i:i+window_size][target_col].values
-        historical_windows.append(window)
-        start_indices.append(i)
-    
-    if not historical_windows:
+    window = len(current)
+    if len(historical) < window * 2:
         return []
     
-    historical_windows = np.array(historical_windows)
-    current = current_pattern[target_col].values.reshape(1, -1)
+    windows, indices = [], []
     
-    # Calculate similarity
-    similarities = cosine_similarity(current, historical_windows)[0]
+    for i in range(len(historical) - window - 30):
+        windows.append(historical.iloc[i:i+window][target_col].values)
+        indices.append(i)
     
-    # Get top N matches
-    top_indices = similarities.argsort()[-n_matches:][::-1]
+    if not windows:
+        return []
+    
+    windows = np.array(windows)
+    current_pattern = current[target_col].values.reshape(1, -1)
+    
+    similarities = cosine_similarity(current_pattern, windows)[0]
+    top_idx = similarities.argsort()[-n:][::-1]
     
     matches = []
-    for idx in top_indices:
-        start_idx = start_indices[idx]
-        match_start = historical_data.iloc[start_idx][date_col]
-        match_window = historical_data.iloc[start_idx:start_idx+window_size]
-        after_window = historical_data.iloc[start_idx+window_size:start_idx+window_size+30]
+    for idx in top_idx:
+        start = indices[idx]
+        match_date = historical.iloc[start][date_col]
+        before = historical.iloc[start:start+window]
+        after = historical.iloc[start+window:start+window+30]
         
-        if len(after_window) > 0:
+        if len(after) > 0:
             matches.append({
-                'start_date': match_start,
+                'start_date': match_date,
                 'similarity': similarities[idx],
-                'before': match_window,
-                'after': after_window,
-                'avg_before': match_window[target_col].mean(),
-                'avg_after': after_window[target_col].mean(),
-                'change_pct': ((after_window[target_col].mean() - match_window[target_col].mean()) 
-                              / match_window[target_col].mean() * 100)
+                'before': before,
+                'after': after,
+                'avg_before': before[target_col].mean(),
+                'avg_after': after[target_col].mean(),
+                'change_pct': ((after[target_col].mean() - before[target_col].mean()) 
+                              / before[target_col].mean() * 100)
             })
     
     return matches
 
-# =============================================================================
-# RISK SCENARIO GENERATOR
-# =============================================================================
-
-def generate_risk_scenarios(base_forecast, drivers_current, driver_cols):
-    """
-    Generate scenarios that answer: "What would have to change for this to be wrong?"
-    """
+def generate_risk_scenarios(driver_cols):
+    """Generate risk scenarios"""
     scenarios = []
     
     for driver in driver_cols:
-        # Downside scenario
-        scenarios.append({
-            'name': f'{driver} Drops 20%',
-            'type': 'downside',
-            'driver': driver,
-            'change': -20,
-            'likelihood': 'Medium' if 'price' in driver.lower() else 'Low'
-        })
-        
-        # Upside scenario
-        scenarios.append({
-            'name': f'{driver} Increases 20%',
-            'type': 'upside',
-            'driver': driver,
-            'change': 20,
-            'likelihood': 'Medium'
-        })
+        scenarios.extend([
+            {'name': f'{driver} ↓20%', 'driver': driver, 'change': -20, 
+             'type': 'downside', 'likelihood': 'Medium'},
+            {'name': f'{driver} ↑20%', 'driver': driver, 'change': 20,
+             'type': 'upside', 'likelihood': 'Medium'}
+        ])
     
-    # Extreme scenario
     scenarios.append({
-        'name': 'Market Shock (All Drivers Deteriorate)',
-        'type': 'extreme_downside',
-        'driver': 'all',
-        'change': -30,
-        'likelihood': 'Very Low'
+        'name': 'Market Shock', 'driver': 'all', 'change': -30,
+        'type': 'extreme_downside', 'likelihood': 'Low'
     })
     
     return scenarios
@@ -370,404 +573,275 @@ def generate_risk_scenarios(base_forecast, drivers_current, driver_cols):
 # MAIN APP
 # =============================================================================
 
+st.title("Explainable Forecasting")
+
 # Sidebar
 with st.sidebar:
-    st.title("Setup")
+    st.title("📂 Upload")
     
-    uploaded = st.file_uploader("Upload CSV (optional)", type=['csv'])
-    raw_df = load_user_data(uploaded)
+    uploaded = st.file_uploader("CSV or Excel", type=['csv', 'xlsx', 'xls'])
     
-    st.success(f"✓ {len(raw_df)} rows loaded")
+    if uploaded is None:
+        st.error("⚠️ Upload required")
+        st.info("Need: date column + numeric target + optional drivers")
+        st.stop()
     
-    # Column selection
+    raw_df = load_data(uploaded)
+    
+    if raw_df is None:
+        st.stop()
+    
+    st.success(f"✓ {len(raw_df)} rows")
+    
+    # Columns
     all_cols = list(raw_df.columns)
-    date_col = st.selectbox("Date Column", all_cols, 
-                            index=next((i for i, c in enumerate(all_cols) if 'date' in c.lower()), 0))
+    date_cols = [c for c in all_cols if raw_df[c].dtype == 'datetime64[ns]']
+    
+    if not date_cols:
+        date_cols = [c for c in all_cols if 'date' in c.lower()]
+    
+    if not date_cols:
+        st.error("No date column!")
+        st.stop()
+    
+    date_col = st.selectbox("Date", date_cols)
     
     try:
         raw_df[date_col] = pd.to_datetime(raw_df[date_col])
     except:
-        st.error("Invalid date column")
+        st.error("Can't parse dates")
         st.stop()
     
     numeric_cols = raw_df.select_dtypes(include=np.number).columns.tolist()
-    target_col = st.selectbox("Forecast Variable", numeric_cols)
-    driver_cols = st.multiselect("Influential Factors (Drivers)", 
-                                 [c for c in numeric_cols if c != target_col],
-                                 default=[c for c in numeric_cols if c != target_col][:2])
     
-    if not driver_cols:
-        st.warning("Select at least one driver")
+    if not numeric_cols:
+        st.error("No numeric columns!")
         st.stop()
     
+    target_col = st.selectbox("Target", numeric_cols)
+    
+    driver_cols = st.multiselect(
+        "Drivers (optional)",
+        [c for c in numeric_cols if c != target_col]
+    )
+    
     st.markdown("---")
-    st.markdown("### Scenario Planning")
+    st.markdown("### 🎲 Scenario")
+    
     scenario_changes = {}
-    for driver in driver_cols:
-        scenario_changes[driver] = st.slider(
-            f"{driver}", -50, 50, 0, 
-            format="%d%%", key=f"scen_{driver}"
-        )
+    if driver_cols:
+        for driver in driver_cols:
+            scenario_changes[driver] = st.slider(
+                driver, -50, 50, 0, key=f"scn_{driver}"
+            )
 
-# Train model
-with st.spinner("Training models..."):
+# Feature engineering
+with st.spinner("Engineering features..."):
     processed_df, feature_cols = engineer_features(raw_df, date_col, target_col, driver_cols)
-    
-    # Split
-    train_size = len(processed_df) - 60
-    train_df = processed_df.iloc[:train_size]
-    test_df = processed_df.iloc[train_size:]
-    
-    X_train = train_df[feature_cols]
-    y_train = train_df[target_col]
-    X_test = test_df[feature_cols]
-    y_test = test_df[target_col]
-    
-    # Train ensemble
-    ensemble = ConfidenceEnsemble()
-    ensemble.fit(X_train, y_train, feature_cols)
-    
-    # Evaluate
-    test_preds = ensemble.predict_with_confidence(X_test)
-    mape = mean_absolute_percentage_error(y_test, test_preds['mean'])
-    mae = mean_absolute_error(y_test, test_preds['mean'])
 
-# Header
-st.title(f"Forecast: {target_col}")
+st.info(f"📊 {len(processed_df)} samples ready")
 
-# Top metrics
+# Split
+train_size = len(processed_df) - 60
+train_df = processed_df.iloc[:train_size]
+test_df = processed_df.iloc[train_size:]
+
+# Train
+ensemble = ProductionEnsemble()
+
+with st.spinner("Training models..."):
+    ensemble.fit(train_df, date_col, target_col, feature_cols)
+
+# Evaluate
+test_preds = ensemble.predict_with_confidence(test_df, feature_cols)
+
+if test_preds is None:
+    st.stop()
+
+mape = mean_absolute_percentage_error(test_df[target_col], test_preds['mean'])
+mae = mean_absolute_error(test_df[target_col], test_preds['mean'])
+
+# Metrics
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Model Accuracy", f"{(1-mape)*100:.1f}%", 
-              help="How often the model was right in testing")
+    st.metric("Accuracy", f"{(1-mape)*100:.1f}%")
 with col2:
-    confidence_score = 100 - (test_preds['model_std'].mean() / test_preds['mean'].mean() * 100)
-    st.metric("Confidence Score", f"{confidence_score:.0f}/100",
-              help="Based on model agreement")
+    conf = 100 - (test_preds['model_std'].mean() / test_preds['mean'].mean() * 100)
+    st.metric("Confidence", f"{conf:.0f}/100")
 with col3:
-    st.metric("Avg Error", f"±{mae:.0f}",
-              help="Typical prediction error in actual units")
+    st.metric("Avg Error", f"±{mae:.0f}")
 with col4:
-    recent_trend = (processed_df[target_col].iloc[-7:].mean() - 
-                   processed_df[target_col].iloc[-14:-7].mean()) / processed_df[target_col].iloc[-14:-7].mean() * 100
-    st.metric("Recent Trend", f"{recent_trend:+.1f}%")
+    st.metric("Models", len(ensemble.models))
 
 st.divider()
 
-# Main tabs
+# Tabs
 tab1, tab2, tab3, tab4 = st.tabs([
     "📈 Forecast",
+    "🔬 Trend & Seasonality",
     "🔍 Historical Precedent",
-    "⚠️ Risk Scenarios",
-    "🎯 Forecast Drivers"
+    "⚠️ Risk"
 ])
 
-# TAB 1: Forecast
+# Generate forecast
+last_date = processed_df[date_col].max()
+future_dates = pd.date_range(last_date + timedelta(days=1), periods=30, freq='D')
+future_df = pd.DataFrame({date_col: future_dates})
+
+# Apply scenarios to drivers
+recent = processed_df.tail(60)
+for driver in driver_cols:
+    base = recent[driver].mean()
+    pct = scenario_changes.get(driver, 0)
+    future_df[driver] = base * (1 + pct/100)
+
+# CRITICAL: Properly create all features
+future_df = create_future_features(future_df, recent, date_col, target_col, driver_cols, feature_cols)
+
+# Predict
+future_preds = ensemble.predict_with_confidence(future_df, feature_cols)
+
+# TAB 1
 with tab1:
+    st.markdown("### Forecast")
     
-    # Generate future forecast
-    last_date = processed_df[date_col].max()
-    future_dates = pd.date_range(last_date + timedelta(days=1), periods=30, freq='D')
-    
-    # Simplified future feature generation
-    recent = processed_df.tail(60)
-    future_df = pd.DataFrame({date_col: future_dates})
-    
-    # Apply scenarios to drivers
-    for driver in driver_cols:
-        base_val = recent[driver].mean()
-        pct = scenario_changes.get(driver, 0)
-        future_df[driver] = base_val * (1 + pct/100)
-    
-    # Calendar features
-    future_df['DayOfWeek'] = future_df[date_col].dt.dayofweek
-    future_df['Month'] = future_df[date_col].dt.month
-    future_df['Quarter'] = future_df[date_col].dt.quarter
-    future_df['IsWeekend'] = (future_df['DayOfWeek'] >= 5).astype(int)
-    future_df['DayOfMonth'] = future_df[date_col].dt.day
-    future_df['DayOfWeek_Sin'] = np.sin(2 * np.pi * future_df['DayOfWeek'] / 7)
-    future_df['DayOfWeek_Cos'] = np.cos(2 * np.pi * future_df['DayOfWeek'] / 7)
-    future_df['Month_Sin'] = np.sin(2 * np.pi * future_df['Month'] / 12)
-    future_df['Month_Cos'] = np.cos(2 * np.pi * future_df['Month'] / 12)
-    
-    # Lags (use recent history)
-    for lag in [1, 7, 14, 28]:
-        future_df[f'Lag_{lag}'] = recent[target_col].iloc[-lag:].mean()
-    
-    for window in [7, 14, 28]:
-        future_df[f'RollingMean_{window}'] = recent[target_col].tail(window).mean()
-        future_df[f'RollingStd_{window}'] = recent[target_col].tail(window).std()
-    
-    future_df['Momentum_7'] = recent[target_col].diff().tail(7).mean()
-    
-    # Predict
-    X_future = future_df[feature_cols]
-    future_preds = ensemble.predict_with_confidence(X_future)
-    
-    # Visualization
     fig = go.Figure()
     
-    # Historical
     hist = processed_df.tail(90)
     fig.add_trace(go.Scatter(
         x=hist[date_col], y=hist[target_col],
-        name='Historical', line=dict(color='gray', width=2),
-        hovertemplate='%{y:.0f}<extra></extra>'
+        name='History', line=dict(color='gray', width=2)
     ))
     
-    # Forecast mean
     fig.add_trace(go.Scatter(
         x=future_dates, y=future_preds['mean'],
-        name='Most Likely', line=dict(color='#00CC96', width=4),
-        hovertemplate='%{y:.0f}<extra></extra>'
+        name='Forecast', line=dict(color='#00CC96', width=4)
     ))
     
-    # 68% confidence band
+    # CI bands
     fig.add_trace(go.Scatter(
         x=future_dates, y=future_preds['ci_68'][1],
-        fill=None, mode='lines', line_color='rgba(0,204,150,0)',
-        showlegend=False, hoverinfo='skip'
+        fill=None, mode='lines', line_color='rgba(0,0,0,0)', showlegend=False
     ))
     fig.add_trace(go.Scatter(
         x=future_dates, y=future_preds['ci_68'][0],
-        fill='tonexty', mode='lines', line_color='rgba(0,204,150,0)',
-        name='68% Confidence', fillcolor='rgba(0,204,150,0.3)',
-        hovertemplate='Range: %{y:.0f}<extra></extra>'
+        fill='tonexty', mode='lines', line_color='rgba(0,0,0,0)',
+        name='68% Confidence', fillcolor='rgba(0,204,150,0.3)'
     ))
     
-    # 95% confidence band
     fig.add_trace(go.Scatter(
         x=future_dates, y=future_preds['ci_95'][1],
-        fill=None, mode='lines', line_color='rgba(0,204,150,0)',
-        showlegend=False, hoverinfo='skip'
+        fill=None, mode='lines', line_color='rgba(0,0,0,0)', showlegend=False
     ))
     fig.add_trace(go.Scatter(
         x=future_dates, y=future_preds['ci_95'][0],
-        fill='tonexty', mode='lines', line_color='rgba(0,204,150,0)',
-        name='95% Confidence', fillcolor='rgba(0,204,150,0.15)',
-        hovertemplate='Range: %{y:.0f}<extra></extra>'
+        fill='tonexty', mode='lines', line_color='rgba(0,0,0,0)',
+        name='95% Confidence', fillcolor='rgba(0,204,150,0.15)'
     ))
     
-    fig.update_layout(
-        template='plotly_dark',
-        height=500,
-        hovermode='x unified',
-        showlegend=True
-    )
-    
+    fig.update_layout(template='plotly_dark', height=500)
     st.plotly_chart(fig, width='stretch')
     
-    # Interpretation
     avg_forecast = future_preds['mean'].mean()
-    avg_historical = recent[target_col].tail(30).mean()
-    pct_change = (avg_forecast - avg_historical) / avg_historical * 100
+    avg_hist = recent[target_col].tail(30).mean()
+    pct_change = (avg_forecast - avg_hist) / avg_hist * 100
     
     ci_width = (future_preds['ci_68'][1].mean() - future_preds['ci_68'][0].mean())
-    confidence_level = "HIGH" if ci_width < avg_forecast * 0.2 else "MEDIUM" if ci_width < avg_forecast * 0.4 else "LOW"
+    conf_level = "HIGH" if ci_width < avg_forecast * 0.2 else "MEDIUM" if ci_width < avg_forecast * 0.4 else "LOW"
     
-    if confidence_level == "HIGH":
-        emoji = "✅"
-    elif confidence_level == "MEDIUM":
-        emoji = "⚠️"
-    else:
-        emoji = "🔴"
+    css = "confidence-high" if conf_level == "HIGH" else "confidence-medium" if conf_level == "MEDIUM" else "confidence-low"
+    emoji = "✅" if conf_level == "HIGH" else "⚠️" if conf_level == "MEDIUM" else "🔴"
     
-    st.markdown(f"{emoji} Confidence: {confidence_level}")
-    st.markdown(f"**Most Likely Outcome:** {target_col} will average **{avg_forecast:.0f}** over the next 30 days ({pct_change:+.1f}% vs recent history)")
-    st.markdown(f"**What this means**:")
-    st.markdown(f"* There's a 68% chance the actual result will be within ±{ci_width/2:.0f} of this prediction")
-    st.markdown(f"* There's a 95% chance it will be within ±{(future_preds['ci_95'][1].mean() - future_preds['ci_95'][0].mean())/2:.0f}")
+    st.markdown(f"""
+    <div class="{css}">
+        <h3>{emoji} Confidence: {conf_level}</h3>
+        <p>Forecast: {avg_forecast:.0f} ({pct_change:+.1f}% change)</p>
+        <ul>
+            <li>68% chance within ±{ci_width/2:.0f}</li>
+            <li>95% chance within ±{(future_preds['ci_95'][1].mean() - future_preds['ci_95'][0].mean())/2:.0f}</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Scenario impact
-    if any(v != 0 for v in scenario_changes.values()):
-        st.markdown("### 🎲 Scenario Impact")
-        active_changes = {k: v for k, v in scenario_changes.items() if v != 0}
-        for driver, change in active_changes.items():
-            direction = "↑" if change > 0 else "↓"
-            st.markdown(f"- **{driver}** {direction} {abs(change)}%")
-
-# TAB 2: Historical Precedent
+# TAB 2
 with tab2:
-    st.markdown("### 🔍 \"When did this happen before, and what happened next?\"")
+    st.markdown("### Decomposition")
     
-    current_window = processed_df.tail(30)
-    matches = find_similar_periods(current_window, processed_df.head(train_size), 
-                                   date_col, target_col, n_matches=3)
+    decomp, period = decompose_series(processed_df, date_col, target_col)
+    
+    if decomp is not None:
+        fig = go.Figure()
+        
+        for comp, color in zip(['Observed', 'Trend', 'Seasonal', 'Residual'],
+                               ['white', '#00CC96', '#FFA726', '#EF553B']):
+            fig.add_trace(go.Scatter(
+                x=decomp[date_col], y=decomp[comp],
+                name=comp, line=dict(color=color)
+            ))
+        
+        fig.update_layout(template='plotly_dark', height=600)
+        st.plotly_chart(fig, width='stretch')
+
+# TAB 3
+with tab3:
+    st.markdown("### Historical Precedent")
+    
+    current = processed_df.tail(30)
+    matches = find_similar_periods(current, processed_df.head(train_size), date_col, target_col)
     
     if matches:
-        for i, match in enumerate(matches):
+        for i, m in enumerate(matches):
             st.markdown(f"""
             <div class="precedent-card">
-                <h4>📅 Match #{i+1}: {match['start_date'].strftime('%B %Y')} ({match['similarity']*100:.0f}% similarity)</h4>
-                <p><strong>What happened then:</strong> {target_col} averaged {match['avg_before']:.0f} during the period, 
-                then changed to {match['avg_after']:.0f} in the following 30 days 
-                (<strong>{match['change_pct']:+.1f}%</strong>)</p>
+                <h4>Match #{i+1}: {m['start_date'].strftime('%B %Y')} ({m['similarity']*100:.0f}% similar)</h4>
+                <p>{m['avg_before']:.0f} → {m['avg_after']:.0f} ({m['change_pct']:+.1f}%)</p>
             </div>
             """, unsafe_allow_html=True)
             
-            # Side by side comparison
             col_a, col_b = st.columns(2)
             with col_a:
-                fig_before = px.line(match['before'], x=date_col, y=target_col, 
-                                    title="The Similar Period")
-                fig_before.update_layout(template='plotly_dark', height=250, showlegend=False)
-                st.plotly_chart(fig_before, width='stretch')
-            
+                fig = px.line(m['before'], x=date_col, y=target_col)
+                fig.update_layout(template='plotly_dark', height=250)
+                st.plotly_chart(fig, width='stretch')
             with col_b:
-                fig_after = px.line(match['after'], x=date_col, y=target_col,
-                                   title="What Happened After")
-                fig_after.update_layout(template='plotly_dark', height=250, showlegend=False)
-                st.plotly_chart(fig_after, width='stretch')
+                fig = px.line(m['after'], x=date_col, y=target_col)
+                fig.update_layout(template='plotly_dark', height=250)
+                st.plotly_chart(fig, width='stretch')
         
-        avg_change = np.mean([m['change_pct'] for m in matches])
-        st.success(f"""
-        **Historical Pattern:** When conditions looked like this in the past, 
-        {target_col} changed by an average of **{avg_change:+.1f}%** in the following month.
-        """)
-    else:
-        st.info("Not enough historical data to find similar periods.")
+        avg = np.mean([m['change_pct'] for m in matches])
+        st.success(f"Historical avg: **{avg:+.1f}%**")
 
-# TAB 3: Risk Scenarios
-with tab3:
-    st.markdown("### ⚠️ \"What would have to change for this forecast to be wrong?\"")
-    
-    scenarios = generate_risk_scenarios(future_preds['mean'].mean(), 
-                                       {d: recent[d].mean() for d in driver_cols},
-                                       driver_cols)
-    
-    # Calculate impact for each scenario
-    scenario_results = []
-    for scenario in scenarios:
-        # Create scenario data
-        scenario_df = future_df.copy()
-        
-        if scenario['driver'] != 'all':
-            base = recent[scenario['driver']].mean()
-            scenario_df[scenario['driver']] = base * (1 + scenario['change']/100)
-        else:
-            for d in driver_cols:
-                base = recent[d].mean()
-                scenario_df[d] = base * (1 + scenario['change']/100)
-        
-        # Recompute features
-        for driver in driver_cols:
-            if scenario['driver'] == driver or scenario['driver'] == 'all':
-                base_val = recent[driver].mean()
-                scenario_df[driver] = base_val * (1 + scenario['change']/100)
-        
-        X_scenario = scenario_df[feature_cols]
-        scenario_pred = ensemble.predict_with_confidence(X_scenario)
-        
-        impact = ((scenario_pred['mean'].mean() - future_preds['mean'].mean()) 
-                 / future_preds['mean'].mean() * 100)
-        
-        scenario_results.append({
-            'name': scenario['name'],
-            'type': scenario['type'],
-            'likelihood': scenario['likelihood'],
-            'impact': impact,
-            'forecast': scenario_pred['mean'].mean()
-        })
-    
-    # Display as cards
-    for result in sorted(scenario_results, key=lambda x: abs(x['impact']), reverse=True):
-        if 'downside' in result['type']:
-            st.markdown(f"""
-            <div class="risk-alert">
-                <h4>🔻 {result['name']}</h4>
-                <p><strong>Likelihood:</strong> {result['likelihood']}</p>
-                <p><strong>Impact on Forecast:</strong> {result['impact']:.1f}%</p>
-                <p><strong>New Forecast:</strong> {result['forecast']:.0f} (vs {future_preds['mean'].mean():.0f} baseline)</p>
-            </div>
-            """, unsafe_allow_html=True)
-        elif result['impact'] > 5:
-            st.markdown(f"""
-            <div class="confidence-high">
-                <h4>🔺 {result['name']}</h4>
-                <p><strong>Likelihood:</strong> {result['likelihood']}</p>
-                <p><strong>Impact on Forecast:</strong> +{result['impact']:.1f}%</p>
-                <p><strong>New Forecast:</strong> {result['forecast']:.0f} (vs {future_preds['mean'].mean():.0f} baseline)</p>
-            </div>
-            """, unsafe_allow_html=True)
-
-# TAB 4: Forecast Drivers
+# TAB 4
 with tab4:
-    st.markdown("### 🎯 Forecast Drivers")
+    st.markdown("### Risk Scenarios")
     
-    importance = ensemble.get_feature_importance()
-    
-    # Translate technical features
-    def translate_feature(feat):
-        if feat in driver_cols:
-            return feat
-        elif 'Lag_1' in feat:
-            return 'Yesterday'
-        elif 'Lag_7' in feat:
-            return 'Last Week'
-        elif 'Lag_28' in feat:
-            return 'Last Month'
-        elif 'RollingMean' in feat:
-            return 'Recent Trend'
-        elif 'RollingStd' in feat:
-            return 'Volatility'
-        elif 'Momentum' in feat:
-            return 'Acceleration'
-        elif 'DayOfWeek' in feat:
-            return 'Day Pattern'
-        elif 'Month' in feat:
-            return 'Seasonal Pattern'
-        else:
-            return feat
-    
-    importance['Business_Name'] = importance['Feature'].apply(translate_feature)
-    
-    # Group and aggregate
-    importance_grouped = importance.groupby('Business_Name')['Importance'].sum().reset_index()
-    importance_grouped = importance_grouped.sort_values('Importance', ascending=False).head(8)
-    
-    fig = px.bar(importance_grouped, x='Importance', y='Business_Name', 
-                 orientation='h', color='Importance',
-                 color_continuous_scale='Teal')
-    fig.update_layout(
-        template='plotly_dark',
-        height=400,
-        showlegend=False,
-        yaxis={'categoryorder':'total ascending'}
-    )
-    st.plotly_chart(fig, width='stretch')
-    
-    top_driver = importance_grouped.iloc[0]['Business_Name']
-    st.success(f"""
-    **Bottom Line:** The model pays most attention to **{top_driver}**. 
-    If you want to influence the outcome, start there.
-    """)
-    
-    # Model agreement visualization
-    st.markdown("### How Much Do the Models Agree?")
-    
-    agreement_pct = 100 - (future_preds['model_std'].mean() / future_preds['mean'].mean() * 100)
-    
-    fig_agree = go.Figure()
-    
-    for i, (name, preds) in enumerate(zip(['GradientBoost', 'RandomForest', 'Ridge'], 
-                                          future_preds['model_predictions'])):
-        fig_agree.add_trace(go.Scatter(
-            x=future_dates, y=preds,
-            name=name, mode='lines',
-            line=dict(width=2),
-            hovertemplate=f'{name}: %{{y:.0f}}<extra></extra>'
-        ))
-    
-    fig_agree.update_layout(
-        template='plotly_dark',
-        height=350,
-        title=f"Model Agreement: {agreement_pct:.0f}%"
-    )
-    st.plotly_chart(fig_agree, width='stretch')
-    
-    if agreement_pct > 90:
-        st.success("✅ **High Agreement**: All models see the same pattern. This forecast is reliable.")
-    elif agreement_pct > 75:
-        st.warning("⚠️ **Moderate Agreement**: Some divergence between models. Check risk scenarios.")
+    if not driver_cols:
+        st.warning("No drivers selected")
     else:
-        st.error("🔴 **Low Agreement**: Models disagree significantly. High uncertainty - plan for multiple outcomes.")
+        scenarios = generate_risk_scenarios(driver_cols)
+        
+        for scenario in scenarios[:5]:
+            scenario_df = future_df.copy()
+            
+            if scenario['driver'] != 'all':
+                base = recent[scenario['driver']].mean()
+                scenario_df[scenario['driver']] = base * (1 + scenario['change']/100)
+            else:
+                for d in driver_cols:
+                    base = recent[d].mean()
+                    scenario_df[d] = base * (1 + scenario['change']/100)
+            
+            # Recreate features for scenario
+            scenario_df = create_future_features(scenario_df, recent, date_col, target_col, driver_cols, feature_cols)
+            
+            scenario_pred = ensemble.predict_with_confidence(scenario_df, feature_cols)
+            impact = ((scenario_pred['mean'].mean() - future_preds['mean'].mean()) 
+                     / future_preds['mean'].mean() * 100)
+            
+            if 'downside' in scenario['type']:
+                st.markdown(f"""
+                <div class="risk-alert">
+                    <h4>{scenario['name']}</h4>
+                    <p>Impact: {impact:.1f}% | New: {scenario_pred['mean'].mean():.0f}</p>
+                </div>
+                """, unsafe_allow_html=True)
